@@ -7,7 +7,16 @@ import { config } from './config.js';
 
 const execFileAsync = promisify(execFile);
 
-const JUNK_REGEX = /\b(karaoke|lullaby|tribute|ringtone|8-bit|music box|backing track|instrumental|piano version|cover)\b/i;
+const JUNK_REGEX =
+  /\b(karaoke|lullaby|tribute|ringtone|8-bit|music box|backing track|instrumental|piano version|cover)\b/i;
+
+const YTDLP_COMMON_ARGS = [
+  '--no-playlist',
+  '--js-runtimes',
+  'node',
+  '--extractor-args',
+  'youtube:player_client=android_vr,ios,web',
+];
 
 export async function searchTracks(query) {
   const url = `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=20&country=MX`;
@@ -24,7 +33,6 @@ export async function searchTracks(query) {
     const artist = (item.artistName || '').trim();
     if (!title || !artist) continue;
 
-    // Filtrar versiones de cuna, tributos, karaoke o instrumentales no pedidos
     if (!userWantsCover && (JUNK_REGEX.test(title) || JUNK_REGEX.test(artist))) {
       continue;
     }
@@ -47,32 +55,78 @@ export async function searchTracks(query) {
   return clean;
 }
 
-async function findMatchingYoutubeUrl(track) {
-  const searchQuery = `${track.artist} - ${track.title} official audio`;
-  const { stdout } = await execFileAsync(config.ytdlpPath, [
-    '--flat-playlist',
-    '--dump-single-json',
-    `ytsearch5:${searchQuery}`,
-  ]);
+function pickBestEntry(entries, durationSec, fallbackPrefix) {
+  if (!entries || entries.length === 0) return null;
 
-  const parsed = JSON.parse(stdout);
-  const entries = parsed.entries || [];
-  if (entries.length === 0) {
-    throw new Error('No encontré el audio en YouTube.');
-  }
-
-  // Si conocemos la duración oficial, elegimos el video que coincida (±8 segundos)
-  if (track.durationSec > 0) {
-    const exactMatch = entries.find(
-      (e) => e.duration && Math.abs(e.duration - track.durationSec) <= 8,
+  if (durationSec > 0) {
+    const exact = entries.find(
+      (e) => e.duration && Math.abs(e.duration - durationSec) <= 10,
     );
-    if (exactMatch) {
-      return exactMatch.url || `https://www.youtube.com/watch?v=${exactMatch.id}`;
+    if (exact) {
+      return exact.webpage_url || exact.url || `${fallbackPrefix}${exact.id}`;
     }
   }
 
   const first = entries[0];
-  return first.url || `https://www.youtube.com/watch?v=${first.id}`;
+  return first.webpage_url || first.url || `${fallbackPrefix}${first.id}`;
+}
+
+async function searchAndDownloadAudio(track, rawOut) {
+  const query = `${track.artist} - ${track.title}`;
+
+  // 1. Intento principal en YouTube con cliente móvil y runtime Node
+  try {
+    const { stdout } = await execFileAsync(config.ytdlpPath, [
+      ...YTDLP_COMMON_ARGS,
+      '--flat-playlist',
+      '--dump-single-json',
+      `ytsearch5:${query} audio`,
+    ]);
+    const ytEntries = JSON.parse(stdout).entries || [];
+    const ytUrl = pickBestEntry(ytEntries, track.durationSec, 'https://www.youtube.com/watch?v=');
+
+    if (ytUrl) {
+      await execFileAsync(config.ytdlpPath, [
+        ...YTDLP_COMMON_ARGS,
+        '-x',
+        '--audio-format',
+        'mp3',
+        '--audio-quality',
+        '0',
+        '-o',
+        rawOut,
+        ytUrl,
+      ]);
+      return;
+    }
+  } catch {
+    // Si YouTube bloquea la IP del servidor ("Sign in to confirm"), pasamos a SoundCloud
+  }
+
+  // 2. Respaldo automático en SoundCloud (sin bloqueos de bot en Railway)
+  const { stdout: scOut } = await execFileAsync(config.ytdlpPath, [
+    '--no-playlist',
+    '--flat-playlist',
+    '--dump-single-json',
+    `scsearch5:${query}`,
+  ]);
+  const scEntries = JSON.parse(scOut).entries || [];
+  const scUrl = pickBestEntry(scEntries, track.durationSec, '');
+  if (!scUrl) {
+    throw new Error('No encontré el audio disponible para descargar.');
+  }
+
+  await execFileAsync(config.ytdlpPath, [
+    '--no-playlist',
+    '-x',
+    '--audio-format',
+    'mp3',
+    '--audio-quality',
+    '0',
+    '-o',
+    rawOut,
+    scUrl,
+  ]);
 }
 
 export async function downloadTaggedTrack(track) {
@@ -83,19 +137,7 @@ export async function downloadTaggedTrack(track) {
   const finalMp3 = path.join(os.tmpdir(), `final-${id}.mp3`);
 
   try {
-    const ytUrl = await findMatchingYoutubeUrl(track);
-
-    await execFileAsync(config.ytdlpPath, [
-      '--no-playlist',
-      '-x',
-      '--audio-format',
-      'mp3',
-      '--audio-quality',
-      '0',
-      '-o',
-      rawOut,
-      ytUrl,
-    ]);
+    await searchAndDownloadAudio(track, rawOut);
 
     let hasCover = false;
     if (track.artworkUrl) {
