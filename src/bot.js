@@ -30,22 +30,47 @@ const groupSubjectCache = new Map();
 const chatStates = new Map();
 const botSentIds = new Set();
 
-let ultimoQR = null;
-let estadoConexion = 'Iniciando bot...';
-let activeSock = null;
-let reminderLoopStarted = false;
+const SELF_JIDS_FILE = path.join('auth_info', 'self_jids.json');
+
+function loadSavedSelfJids() {
+  try {
+    if (!fs.existsSync(SELF_JIDS_FILE)) return new Set();
+    return new Set(JSON.parse(fs.readFileSync(SELF_JIDS_FILE, 'utf8')));
+  } catch {
+    return new Set();
+  }
+}
+
+const savedSelfJids = loadSavedSelfJids();
+
+function saveSelfJid(jid) {
+  savedSelfJids.add(jid);
+  fs.mkdirSync('auth_info', { recursive: true });
+  fs.writeFileSync(SELF_JIDS_FILE, JSON.stringify([...savedSelfJids], null, 2));
+}
+
+const sessions = {
+  1: { folder: 'auth_info_1', qr: null, status: 'Iniciando...', sock: null },
+  2: { folder: 'auth_info_2', qr: null, status: 'Iniciando...', sock: null },
+};
+
+let backgroundLoopsStarted = false;
+
+function renderSlotHtml(num, s) {
+  if (s.status === 'Conectado') {
+    return `<div style="border:2px solid #4ade80;border-radius:12px;padding:20px;text-align:center;min-width:260px;"><h3>Dispositivo ${num}</h3><p style="color:#4ade80;font-weight:bold;">✅ Conectado</p></div>`;
+  }
+  if (!s.qr) {
+    return `<div style="border:2px solid #555;border-radius:12px;padding:20px;text-align:center;min-width:260px;"><h3>Dispositivo ${num}</h3><p>⏳ ${s.status}</p></div>`;
+  }
+  return `<div style="border:2px solid #fff;border-radius:12px;padding:20px;text-align:center;background:#fff;color:#111;"><h3>Dispositivo ${num}</h3><div id="qr${num}"></div><script>new QRCode(document.getElementById("qr${num}"),{text:${JSON.stringify(s.qr)},width:250,height:250,correctLevel:QRCode.CorrectLevel.L});</script></div>`;
+}
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-  if (estadoConexion === 'Conectado') {
-    res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#4ade80;"><h1>✅ Bot conectado a WhatsApp</h1></body></html>');
-    return;
-  }
-  if (!ultimoQR) {
-    res.end('<html><head><meta http-equiv="refresh" content="3"></head><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#fff;"><h2>⏳ Generando QR...</h2></body></html>');
-    return;
-  }
-  res.end(`<html><head><meta http-equiv="refresh" content="15"><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;font-family:sans-serif;background:#fff;color:#111;"><h2>Escanea este QR</h2><div id="qrcode" style="padding:20px;border:4px solid #111;border-radius:12px;"></div><script>new QRCode(document.getElementById("qrcode"),{text:${JSON.stringify(ultimoQR)},width:320,height:320,correctLevel:QRCode.CorrectLevel.L});</script></body></html>`);
+  const bothConnected = sessions[1].status === 'Conectado' && sessions[2].status === 'Conectado';
+  const refresh = bothConnected ? '' : '<meta http-equiv="refresh" content="10">';
+  res.end(`<html><head>${refresh}<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script></head><body style="display:flex;flex-wrap:wrap;gap:24px;justify-content:center;align-items:center;min-height:100vh;margin:0;font-family:sans-serif;background:#111;color:#fff;">${renderSlotHtml(1, sessions[1])}${renderSlotHtml(2, sessions[2])}</body></html>`);
 });
 
 server.listen(process.env.PORT || 3000);
@@ -118,6 +143,16 @@ function extractText(c) {
   return (c.conversation || c.extendedTextMessage?.text || c.imageMessage?.caption || c.videoMessage?.caption || c.documentMessage?.caption || '').trim();
 }
 
+function getContextInfo(c) {
+  return (
+    c.extendedTextMessage?.contextInfo ||
+    c.imageMessage?.contextInfo ||
+    c.videoMessage?.contextInfo ||
+    c.documentMessage?.contextInfo ||
+    null
+  );
+}
+
 async function getGroupSubject(sock, jid) {
   if (groupSubjectCache.has(jid)) return groupSubjectCache.get(jid);
   try {
@@ -164,27 +199,27 @@ async function executeWAUrl(sock, jid, msg, url, action) {
   }
 }
 
-function handleReminderAction(platform, chatId, ai) {
+function handleReminderAction(platform, stateKey, ai) {
   if (ai.action === 'reminder') {
     const [isoTime, ...rest] = (ai.query || '').split('|');
     const reminderText = rest.join('|').trim();
-    const item = addReminder({ platform, chatId, text: reminderText, isoTime: isoTime.trim() });
+    const item = addReminder({ platform, chatId: stateKey, text: reminderText, isoTime: isoTime.trim() });
     return `⏰ Listo, te aviso el *${formatMexicoDate(item.triggerAt)}*:\n"${item.text}"`;
   }
   if (ai.action === 'list_reminders') {
-    const list = getUserReminders(platform, chatId);
+    const list = getUserReminders(platform, stateKey);
     if (list.length === 0) return '📭 No tienes recordatorios pendientes.';
     const lines = list.map((r, i) => `${i + 1}. *${formatMexicoDate(r.triggerAt)}* — ${r.text}`);
     return `⏰ *Tus recordatorios pendientes:*\n\n${lines.join('\n')}`;
   }
   if (ai.action === 'clear_reminders') {
-    const count = clearUserReminders(platform, chatId);
+    const count = clearUserReminders(platform, stateKey);
     return count > 0 ? `🗑️ Listo, borré ${count} recordatorio(s).` : '📭 No tenías recordatorios activos.';
   }
   return null;
 }
 
-async function handleWAMessage(sock, msg) {
+async function handleWAMessage(slotNum, sock, msg) {
   const jid = msg.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return;
   if (botSentIds.has(msg.key.id)) return;
@@ -193,17 +228,30 @@ async function handleWAMessage(sock, msg) {
   if (!c) return;
 
   const text = extractText(c);
-  if (text === '!id' && jid.endsWith('@g.us')) {
+  const isGroup = jid.endsWith('@g.us');
+
+  if (text === '!id' && isGroup) {
     await sock.sendMessage(jid, { text: `JID:\n${jid}` }, { quoted: msg });
     return;
   }
 
-  const isGroup = jid.endsWith('@g.us');
-  const myNum = sock.user?.id?.split(':')[0];
+  // Registrar manualmente el chat personal ("Tú") si se envía !yo desde la propia cuenta
+  if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
+    saveSelfJid(jid);
+    await sock.sendMessage(jid, { text: '✅ Chat personal vinculado correctamente.' }, { quoted: msg });
+    return;
+  }
+
+  const myNum = sock.user?.id?.split(':')[0]?.split('@')[0];
+  const myLid = sock.user?.lid?.split(':')[0]?.split('@')[0];
+
   const isSelfChat =
-    (!isGroup && msg.key.fromMe) ||
-    (myNum && jid.startsWith(myNum)) ||
-    config.allowedUserJids.includes(jid);
+    !isGroup &&
+    ((myNum && jid.startsWith(`${myNum}@`)) ||
+      (myLid && jid.startsWith(`${myLid}@`)) ||
+      savedSelfJids.has(jid) ||
+      config.allowedUserJids.includes(jid));
+
   const isAllowedGroup =
     isGroup &&
     (config.allowedGroupJids.includes(jid) ||
@@ -211,20 +259,40 @@ async function handleWAMessage(sock, msg) {
 
   if (!isSelfChat && !isAllowedGroup) return;
 
-  const state = chatStates.get(jid);
+  const stateKey = `${slotNum}:${jid}`;
+  const state = chatStates.get(stateKey);
+  const media = detectMedia(c);
+  const ctx = getContextInfo(c);
 
-  if (isGroup && state?.mode !== 'PDF_COLLECT' && !/^(ey|bot|!)\b/i.test(text) && !detectMedia(c)) {
+  const repliedToBot = Boolean(ctx?.stanzaId && botSentIds.has(ctx.stanzaId));
+  const mentionedBot = Boolean(
+    (myNum && (ctx?.mentionedJid || []).some((m) => m.startsWith(myNum))) ||
+      (myLid && (ctx?.mentionedJid || []).some((m) => m.startsWith(myLid))),
+  );
+  const hasPrefix = /^(ey|bot|!)\b/i.test(text);
+  const isPendingChoice =
+    (state?.mode === 'MUSIC_SELECT' && /^!?[1-5]$/.test(text)) ||
+    (state?.mode === 'LINK_OPTIONS' && /^!?[1-3]$/.test(text));
+
+  if (
+    isGroup &&
+    !media &&
+    state?.mode !== 'PDF_COLLECT' &&
+    !isPendingChoice &&
+    !repliedToBot &&
+    !mentionedBot &&
+    !hasPrefix
+  ) {
     return;
   }
 
   if (/^(!?cancelar|ya estuvo)$/i.test(text)) {
-    chatStates.delete(jid);
-    clearAIHistory(jid);
+    chatStates.delete(stateKey);
+    clearAIHistory(stateKey);
     await sock.sendMessage(jid, { text: '🛑 Listo, cancelado.' }, { quoted: msg });
     return;
   }
 
-  const media = detectMedia(c);
   if (media) {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
     if (state?.mode === 'PDF_COLLECT' && media.isImage) {
@@ -233,7 +301,7 @@ async function handleWAMessage(sock, msg) {
       return;
     }
     if (media.isImage && /pdf/i.test(text)) {
-      chatStates.set(jid, { mode: 'PDF_COLLECT', filename: 'Tarea.pdf', buffers: [buffer] });
+      chatStates.set(stateKey, { mode: 'PDF_COLLECT', filename: 'Tarea.pdf', buffers: [buffer] });
       await sock.sendMessage(jid, { text: '📄 Página 1 guardada. Manda las demás fotos y cuando acabes dime *listo*.' }, { quoted: msg });
       return;
     }
@@ -253,7 +321,7 @@ async function handleWAMessage(sock, msg) {
     const customName = text.replace(/^(!?listo|terminé|termine|ya|armalo|ármalo)\s*/i, '').trim();
     const filename = customName ? sanitizePdfName(customName) : state.filename;
     const buffers = state.buffers;
-    chatStates.delete(jid);
+    chatStates.delete(stateKey);
     if (buffers.length === 0) {
       await sock.sendMessage(jid, { text: '⚠️ No mandaste ninguna foto.' }, { quoted: msg });
       return;
@@ -265,10 +333,11 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  if (state?.mode === 'MUSIC_SELECT' && /^[1-5]$/.test(text)) {
-    const track = state.tracks[Number(text) - 1];
+  if (state?.mode === 'MUSIC_SELECT' && /^!?[1-5]$/.test(text)) {
+    const num = Number(text.replace('!', ''));
+    const track = state.tracks[num - 1];
     if (!track) return;
-    chatStates.delete(jid);
+    chatStates.delete(stateKey);
     await react(sock, jid, msg.key, '⏳');
     try {
       const { buffer, filename } = await downloadTaggedTrack(track);
@@ -281,31 +350,34 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  if (state?.mode === 'LINK_OPTIONS' && /^[123]$/.test(text)) {
+  if (state?.mode === 'LINK_OPTIONS' && /^!?[123]$/.test(text)) {
+    const num = text.replace('!', '');
     const { url } = state;
-    chatStates.delete(jid);
-    return await executeWAUrl(sock, jid, msg, url, { '1': 'video', '2': 'audio', '3': 'sticker' }[text]);
+    chatStates.delete(stateKey);
+    return await executeWAUrl(sock, jid, msg, url, { '1': 'video', '2': 'audio', '3': 'sticker' }[num]);
   }
 
   if (!text) return;
 
   const soloUrl = extractUrl(text);
   if (soloUrl && text.replace(soloUrl, '').trim() === '') {
-    chatStates.set(jid, { mode: 'LINK_OPTIONS', url: soloUrl });
+    chatStates.set(stateKey, { mode: 'LINK_OPTIONS', url: soloUrl });
     await sock.sendMessage(jid, { text: '¿Cómo lo quieres?\n1️⃣ Video\n2️⃣ Audio\n3️⃣ Sticker' }, { quoted: msg });
     return;
   }
 
+  const cleanPrompt = text.replace(/^@\d+\s*/g, '').replace(/^(ey|bot|!)\s*/i, '').trim() || text;
+
   try {
-    const ai = await processWithAI(jid, text);
-    const remReply = handleReminderAction('wa', jid, ai);
+    const ai = await processWithAI(stateKey, cleanPrompt);
+    const remReply = handleReminderAction('wa', stateKey, ai);
     if (remReply) {
       await sock.sendMessage(jid, { text: remReply }, { quoted: msg });
     } else if (ai.action === 'menu') {
       await sock.sendMessage(jid, { text: MENU_TEXT }, { quoted: msg });
     } else if (ai.action === 'pdf') {
       const filename = ai.query ? sanitizePdfName(ai.query) : 'Tarea.pdf';
-      chatStates.set(jid, { mode: 'PDF_COLLECT', filename, buffers: [] });
+      chatStates.set(stateKey, { mode: 'PDF_COLLECT', filename, buffers: [] });
       await sock.sendMessage(jid, { text: `📄 Va, manda las fotos para *${filename}* y cuando termines dime *listo*.` }, { quoted: msg });
     } else if (ai.action === 'music' && ai.query) {
       await react(sock, jid, msg.key, '🔍');
@@ -314,7 +386,7 @@ async function handleWAMessage(sock, msg) {
         await sock.sendMessage(jid, { text: `❌ No encontré "${ai.query}".` }, { quoted: msg });
         return;
       }
-      chatStates.set(jid, { mode: 'MUSIC_SELECT', tracks });
+      chatStates.set(stateKey, { mode: 'MUSIC_SELECT', tracks });
       const list = tracks.map((t, i) => `${i + 1}️⃣ *${t.title}* - ${t.artist}`).join('\n');
       await sock.sendMessage(jid, { text: `🎵 Encontré estas (responde del *1* al *${tracks.length}*):\n\n${list}` }, { quoted: msg });
     } else if (ai.action === 'download_video' && (ai.query || soloUrl)) {
@@ -512,13 +584,61 @@ async function startTelegramBot() {
   }
 }
 
+async function startWASlot(slotNum) {
+  const slot = sessions[slotNum];
+  const { state, saveCreds } = await useMultiFileAuthState(path.join('auth_info', slot.folder));
+  const { version } = await fetchLatestBaileysVersion();
+  const sock = makeWASocket({
+    version,
+    logger,
+    auth: state,
+    printQRInTerminal: false,
+    browser: ['Ubuntu', 'Chrome', `20.0.${slotNum}`],
+  });
+  slot.sock = sock;
+
+  const origSend = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const sent = await origSend(...args);
+    if (sent?.key?.id) {
+      botSentIds.add(sent.key.id);
+      setTimeout(() => botSentIds.delete(sent.key.id), 300000);
+    }
+    return sent;
+  };
+
+  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
+    if (qr) { slot.qr = qr; slot.status = 'Esperando QR'; }
+    if (connection === 'close') {
+      slot.status = 'Reconectando...';
+      if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
+        setTimeout(() => startWASlot(slotNum), 3000);
+      } else {
+        slot.status = 'Sesión cerrada';
+      }
+    } else if (connection === 'open') {
+      slot.qr = null;
+      slot.status = 'Conectado';
+    }
+  });
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) await handleWAMessage(slotNum, sock, msg);
+  });
+}
+
 export async function startBot() {
-  if (!reminderLoopStarted) {
-    reminderLoopStarted = true;
+  if (!backgroundLoopsStarted) {
+    backgroundLoopsStarted = true;
     startTelegramBot();
     startReminderLoop({
-      sendWA: async (jid, text) => {
-        if (activeSock) await activeSock.sendMessage(jid, { text });
+      sendWA: async (stateKey, text) => {
+        const idx = stateKey.indexOf(':');
+        const slotNum = Number(stateKey.slice(0, idx));
+        const jid = stateKey.slice(idx + 1);
+        const sock = sessions[slotNum]?.sock;
+        if (sock) await sock.sendMessage(jid, { text });
       },
       sendTG: async (chatId, text) => {
         const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -527,34 +647,6 @@ export async function startBot() {
     });
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  const { version } = await fetchLatestBaileysVersion();
-  const sock = makeWASocket({ version, logger, auth: state, printQRInTerminal: false, browser: ['Ubuntu', 'Chrome', '20.0.04'] });
-  activeSock = sock;
-
-  const origSend = sock.sendMessage.bind(sock);
-  sock.sendMessage = async (...args) => {
-    const sent = await origSend(...args);
-    if (sent?.key?.id) {
-      botSentIds.add(sent.key.id);
-      setTimeout(() => botSentIds.delete(sent.key.id), 60000);
-    }
-    return sent;
-  };
-
-  sock.ev.on('creds.update', saveCreds);
-  sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
-    if (qr) { ultimoQR = qr; estadoConexion = 'Esperando QR'; }
-    if (connection === 'close') {
-      estadoConexion = 'Reconectando...';
-      if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) setTimeout(() => startBot(), 3000);
-    } else if (connection === 'open') {
-      ultimoQR = null;
-      estadoConexion = 'Conectado';
-    }
-  });
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of messages) await handleWAMessage(sock, msg);
-  });
+  startWASlot(1);
+  startWASlot(2);
 }
