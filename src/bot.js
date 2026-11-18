@@ -175,7 +175,6 @@ async function handleWAMessage(sock, msg) {
 
   const state = chatStates.get(jid);
 
-  // En grupos, exigir prefijo ("ey", "bot" o "!") salvo que ya esté juntando fotos para PDF
   if (isGroup && state?.mode !== 'PDF_COLLECT' && !/^(ey|bot|!)\b/i.test(text) && !detectMedia(c)) {
     return;
   }
@@ -187,7 +186,6 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 1. Fotos / videos recibidos
   const media = detectMedia(c);
   if (media) {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
@@ -201,7 +199,6 @@ async function handleWAMessage(sock, msg) {
       await sock.sendMessage(jid, { text: '📄 Página 1 guardada. Manda las demás fotos y cuando acabes dime *listo*.' }, { quoted: msg });
       return;
     }
-    // Por defecto si manda foto/video directo -> Sticker
     await react(sock, jid, msg.key, '⏳');
     try {
       const sticker = await convertToSticker(buffer, { isAnimated: media.isAnimated, ext: media.ext, packName: config.packName, author: config.author, maxVideoSeconds: config.maxVideoSeconds });
@@ -214,7 +211,6 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 2. Terminar PDF activo
   if (state?.mode === 'PDF_COLLECT' && /^(!?listo|terminé|termine|ya|armalo|ármalo)\b/i.test(text)) {
     const customName = text.replace(/^(!?listo|terminé|termine|ya|armalo|ármalo)\s*/i, '').trim();
     const filename = customName ? sanitizePdfName(customName) : state.filename;
@@ -231,7 +227,6 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 3. Selección de canción (1-5)
   if (state?.mode === 'MUSIC_SELECT' && /^[1-5]$/.test(text)) {
     const track = state.tracks[Number(text) - 1];
     if (!track) return;
@@ -248,7 +243,6 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 4. Selección de enlace (1-3)
   if (state?.mode === 'LINK_OPTIONS' && /^[123]$/.test(text)) {
     const { url } = state;
     chatStates.delete(jid);
@@ -257,7 +251,6 @@ async function handleWAMessage(sock, msg) {
 
   if (!text) return;
 
-  // Si mandó un link solito sin decir qué quiere
   const soloUrl = extractUrl(text);
   if (soloUrl && text.replace(soloUrl, '').trim() === '') {
     chatStates.set(jid, { mode: 'LINK_OPTIONS', url: soloUrl });
@@ -265,10 +258,8 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 5. Todo lo demás pasa directo por la IA natural
   try {
     const ai = await processWithAI(jid, text);
-
     if (ai.action === 'menu') {
       await sock.sendMessage(jid, { text: MENU_TEXT }, { quoted: msg });
     } else if (ai.action === 'pdf') {
@@ -295,7 +286,7 @@ async function handleWAMessage(sock, msg) {
       await sock.sendMessage(jid, { text: ai.reply }, { quoted: msg });
     }
   } catch (err) {
-    await sock.sendMessage(jid, { text: `❌ Error: ${err.message}` }, { quoted: msg });
+    await sock.sendMessage(jid, { text: `❌ Error IA: ${err.message}` }, { quoted: msg });
   }
 }
 
@@ -386,43 +377,47 @@ async function startTelegramBot() {
             continue;
           }
 
-          const ai = await processWithAI(chatId, text);
-          if (ai.action === 'menu') {
-            await tgApi(token, 'sendMessage', { chat_id: chatId, text: MENU_TEXT, parse_mode: 'Markdown' });
-          } else if (ai.action === 'pdf') {
-            const filename = ai.query ? sanitizePdfName(ai.query) : 'Tarea.pdf';
-            chatStates.set(chatId, { mode: 'PDF_COLLECT', filename, buffers: [] });
-            await tgApi(token, 'sendMessage', { chat_id: chatId, text: `📄 Va, manda las fotos para ${filename} y cuando termines dime listo.` });
-          } else if (ai.action === 'music' && ai.query) {
-            const tracks = await searchTracks(ai.query);
-            if (tracks.length === 0) {
-              await tgApi(token, 'sendMessage', { chat_id: chatId, text: `❌ No encontré "${ai.query}".` });
-              continue;
-            }
-            chatStates.set(chatId, { mode: 'MUSIC_SELECT', tracks });
-            const buttons = tracks.map((t, i) => [{ text: `🎵 ${t.title} - ${t.artist}`, callback_data: `song:${i}` }]);
-            await tgApi(token, 'sendMessage', { chat_id: chatId, text: 'Elige la canción:', reply_markup: { inline_keyboard: buttons } });
-          } else if (['download_video', 'download_audio', 'sticker'].includes(ai.action) && (ai.query || soloUrl)) {
-            const target = ai.query || soloUrl;
-            const wait = await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⏳ Procesando...' });
-            try {
-              if (ai.action === 'download_video') {
-                const { buffer } = await downloadFromUrl(target, 'video');
-                await tgSendFile(token, 'sendVideo', chatId, 'video', buffer, 'video.mp4');
-              } else if (ai.action === 'download_audio') {
-                const { buffer } = await downloadFromUrl(target, 'audio');
-                await tgSendFile(token, 'sendAudio', chatId, 'audio', buffer, 'audio.mp3');
-              } else {
-                const { buffer, ext } = await downloadFromUrl(target, 'sticker');
-                const sticker = await convertToSticker(buffer, { isAnimated: true, ext, packName: config.packName, author: config.author, maxVideoSeconds: config.maxVideoSeconds });
-                await tgSendFile(token, 'sendSticker', chatId, 'sticker', sticker, 'sticker.webp');
+          try {
+            const ai = await processWithAI(chatId, text);
+            if (ai.action === 'menu') {
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: MENU_TEXT });
+            } else if (ai.action === 'pdf') {
+              const filename = ai.query ? sanitizePdfName(ai.query) : 'Tarea.pdf';
+              chatStates.set(chatId, { mode: 'PDF_COLLECT', filename, buffers: [] });
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: `📄 Va, manda las fotos para ${filename} y cuando termines dime listo.` });
+            } else if (ai.action === 'music' && ai.query) {
+              const tracks = await searchTracks(ai.query);
+              if (tracks.length === 0) {
+                await tgApi(token, 'sendMessage', { chat_id: chatId, text: `❌ No encontré "${ai.query}".` });
+                continue;
               }
-              await tgApi(token, 'deleteMessage', { chat_id: chatId, message_id: wait.result.message_id });
-            } catch (err) {
-              await tgApi(token, 'editMessageText', { chat_id: chatId, message_id: wait.result.message_id, text: `❌ Error: ${err.message}` });
+              chatStates.set(chatId, { mode: 'MUSIC_SELECT', tracks });
+              const buttons = tracks.map((t, i) => [{ text: `🎵 ${t.title} - ${t.artist}`, callback_data: `song:${i}` }]);
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: 'Elige la canción:', reply_markup: { inline_keyboard: buttons } });
+            } else if (['download_video', 'download_audio', 'sticker'].includes(ai.action) && (ai.query || soloUrl)) {
+              const target = ai.query || soloUrl;
+              const wait = await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⏳ Procesando...' });
+              try {
+                if (ai.action === 'download_video') {
+                  const { buffer } = await downloadFromUrl(target, 'video');
+                  await tgSendFile(token, 'sendVideo', chatId, 'video', buffer, 'video.mp4');
+                } else if (ai.action === 'download_audio') {
+                  const { buffer } = await downloadFromUrl(target, 'audio');
+                  await tgSendFile(token, 'sendAudio', chatId, 'audio', buffer, 'audio.mp3');
+                } else {
+                  const { buffer, ext } = await downloadFromUrl(target, 'sticker');
+                  const sticker = await convertToSticker(buffer, { isAnimated: true, ext, packName: config.packName, author: config.author, maxVideoSeconds: config.maxVideoSeconds });
+                  await tgSendFile(token, 'sendSticker', chatId, 'sticker', sticker, 'sticker.webp');
+                }
+                await tgApi(token, 'deleteMessage', { chat_id: chatId, message_id: wait.result.message_id });
+              } catch (err) {
+                await tgApi(token, 'editMessageText', { chat_id: chatId, message_id: wait.result.message_id, text: `❌ Error: ${err.message}` });
+              }
+            } else {
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: ai.reply });
             }
-          } else {
-            await tgApi(token, 'sendMessage', { chat_id: chatId, text: ai.reply });
+          } catch (err) {
+            await tgApi(token, 'sendMessage', { chat_id: chatId, text: `❌ Error IA: ${err.message}` });
           }
         }
 
