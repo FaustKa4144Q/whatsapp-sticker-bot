@@ -17,7 +17,7 @@ import { convertToSticker } from './stickerConverter.js';
 const execFileAsync = promisify(execFile);
 const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
-const pendingLinks = new Map(); // Guarda el último link por chat en WhatsApp
+const pendingLinks = new Map();
 
 let ultimoQR = null;
 let estadoConexion = 'Iniciando bot...';
@@ -79,7 +79,7 @@ server.listen(PORT, () => {
 });
 
 // ==========================================
-// 2. MOTOR DE DESCARGA (YT-DLP + FFMPEG)
+// 2. MOTOR DE DESCARGA (TIKTOK + YT-DLP)
 // ==========================================
 const SUPPORTED_URL_REGEX =
   /https?:\/\/(?:www\.|m\.|vm\.|vt\.)?(?:x\.com|twitter\.com|instagram\.com|tiktok\.com|youtube\.com|youtu\.be)\/[^\s]+/i;
@@ -89,7 +89,40 @@ function extractSupportedUrl(text) {
   return match ? match[0] : null;
 }
 
+async function downloadFromTikTok(url, mode) {
+  const apiRes = await fetch(
+    `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`,
+  );
+  const json = await apiRes.json();
+  if (json.code !== 0 || !json.data) {
+    throw new Error(json.msg || 'No se pudo obtener el enlace de TikTok');
+  }
+
+  const targetUrl = mode === 'audio' ? json.data.music : json.data.play;
+  if (!targetUrl) {
+    throw new Error('TikTok no devolvió archivo descargable');
+  }
+
+  const fileRes = await fetch(targetUrl);
+  if (!fileRes.ok) {
+    throw new Error(`Error descargando archivo de TikTok (${fileRes.status})`);
+  }
+
+  const arrayBuffer = await fileRes.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  return {
+    buffer,
+    ext: mode === 'audio' ? 'mp3' : 'mp4',
+    isVideo: mode !== 'audio',
+  };
+}
+
 async function downloadMediaFromUrl(url, mode) {
+  // Si es TikTok, usar extractor directo sin marca de agua
+  if (/tiktok\.com/i.test(url)) {
+    return await downloadFromTikTok(url, mode);
+  }
+
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
   if (mode === 'audio') {
@@ -114,7 +147,6 @@ async function downloadMediaFromUrl(url, mode) {
     }
   }
 
-  // Modo 'video' o 'sticker'
   const tempPath = path.join(os.tmpdir(), `wsb-vid-${id}.mp4`);
   try {
     await execFileAsync(config.ytdlpPath, [
@@ -252,7 +284,6 @@ async function handleWhatsAppMessage(sock, msg) {
   const content = unwrapMessage(msg.message);
   if (!content) return;
 
-  // Ignorar respuestas propias del bot (stickers, videos o audios enviados por el bot)
   if (
     msg.key.fromMe &&
     (content.stickerMessage || content.videoMessage || content.audioMessage)
@@ -300,7 +331,6 @@ async function handleWhatsAppMessage(sock, msg) {
       return;
     }
 
-    // Si mandó el link solo -> Mostrar menú interactivo
     pendingLinks.set(remoteJid, { url, time: Date.now() });
     await sock.sendMessage(
       remoteJid,
@@ -398,7 +428,6 @@ async function startTelegramBot() {
       for (const update of data.result) {
         offset = update.update_id + 1;
 
-        // Usuario mandó mensaje
         if (update.message) {
           const chatId = update.message.chat.id;
           const text = update.message.text || '';
@@ -408,136 +437,4 @@ async function startTelegramBot() {
             const linkId = Math.random().toString(36).slice(2, 9);
             telegramLinks.set(linkId, url);
 
-            await tgApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: '¿Qué quieres hacer con este enlace?',
-              reply_to_message_id: update.message.message_id,
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    { text: '🎬 Video', callback_data: `video:${linkId}` },
-                    { text: '🎵 Solo Audio', callback_data: `audio:${linkId}` },
-                  ],
-                  [{ text: '🖼️ Sticker', callback_data: `sticker:${linkId}` }],
-                ],
-              },
-            });
-          } else if (text === '/start') {
-            await tgApi(token, 'sendMessage', {
-              chat_id: chatId,
-              text: '¡Listo! Mándame un link de X, Instagram, TikTok o YouTube y elige si quieres video, audio o sticker.',
-            });
-          }
-        }
-
-        // Usuario tocó uno de los botones
-        if (update.callback_query) {
-          const cb = update.callback_query;
-          const chatId = cb.message.chat.id;
-          const msgId = cb.message.message_id;
-          const [action, linkId] = (cb.data || '').split(':');
-          const url = telegramLinks.get(linkId);
-
-          await tgApi(token, 'answerCallbackQuery', {
-            callback_query_id: cb.id,
-            text: 'Procesando...',
-          });
-
-          if (!url) {
-            await tgApi(token, 'editMessageText', {
-              chat_id: chatId,
-              message_id: msgId,
-              text: '⚠️ Este enlace ya caducó. Mándalo de nuevo.',
-            });
-            continue;
-          }
-
-          telegramLinks.delete(linkId);
-          await tgApi(token, 'editMessageText', {
-            chat_id: chatId,
-            message_id: msgId,
-            text: `⏳ Procesando ${action}...`,
-          });
-
-          try {
-            if (action === 'video') {
-              const { buffer } = await downloadMediaFromUrl(url, 'video');
-              await tgSendFile(token, 'sendVideo', chatId, 'video', buffer, 'video.mp4');
-            } else if (action === 'audio') {
-              const { buffer } = await downloadMediaFromUrl(url, 'audio');
-              await tgSendFile(token, 'sendAudio', chatId, 'audio', buffer, 'audio.mp3');
-            } else if (action === 'sticker') {
-              const { buffer, ext } = await downloadMediaFromUrl(url, 'sticker');
-              const sticker = await convertToSticker(buffer, {
-                isAnimated: true,
-                ext,
-                packName: config.packName,
-                author: config.author,
-                maxVideoSeconds: config.maxVideoSeconds,
-              });
-              await tgSendFile(token, 'sendSticker', chatId, 'sticker', sticker, 'sticker.webp');
-            }
-            await tgApi(token, 'deleteMessage', { chat_id: chatId, message_id: msgId });
-          } catch (err) {
-            await tgApi(token, 'editMessageText', {
-              chat_id: chatId,
-              message_id: msgId,
-              text: `❌ Error: ${err.message}`,
-            });
-          }
-        }
-      }
-    } catch (err) {
-      console.error('[Telegram] Error polling:', err.message);
-      await new Promise((r) => setTimeout(r, 3000));
-    }
-  }
-}
-
-// ==========================================
-// 5. ARRANQUE DE AMBOS BOTS
-// ==========================================
-export async function startBot() {
-  startTelegramBot();
-
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  const { version } = await fetchLatestBaileysVersion();
-
-  const sock = makeWASocket({
-    version,
-    logger,
-    auth: state,
-    printQRInTerminal: false,
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
-  });
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      ultimoQR = qr;
-      estadoConexion = 'Esperando QR';
-      console.log('[WhatsApp] Nuevo QR generado en la página web.');
-    }
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      estadoConexion = 'Reconectando...';
-      if (shouldReconnect) {
-        setTimeout(() => startBot(), 3000);
-      }
-    } else if (connection === 'open') {
-      ultimoQR = null;
-      estadoConexion = 'Conectado';
-      console.log('[WhatsApp] Conectado correctamente.');
-    }
-  });
-
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of messages) {
-      await handleWhatsAppMessage(sock, msg);
-    }
-  });
-}
+            await tgApi(
