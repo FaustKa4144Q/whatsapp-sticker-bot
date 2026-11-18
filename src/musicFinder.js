@@ -10,12 +10,12 @@ const execFileAsync = promisify(execFile);
 const JUNK_REGEX =
   /\b(karaoke|lullaby|tribute|ringtone|8-bit|music box|backing track|instrumental|piano version|cover)\b/i;
 
-const YTDLP_COMMON_ARGS = [
+const YTDLP_YT_ARGS = [
   '--no-playlist',
   '--js-runtimes',
   'node',
   '--extractor-args',
-  'youtube:player_client=android_vr,ios,web',
+  'youtube:player_client=tv_embedded,android_vr,ios',
 ];
 
 function scoreRelevance(track, query) {
@@ -93,38 +93,79 @@ export async function searchTracks(query) {
   return clean.slice(0, 5);
 }
 
-function pickBestEntry(entries, durationSec, fallbackPrefix) {
-  if (!entries || entries.length === 0) return null;
+function rankEntriesByDuration(entries, durationSec, fallbackPrefix) {
+  if (!entries || entries.length === 0) return [];
+
+  const valid = entries.filter((e) => !e.duration || e.duration >= 45);
+  const list = valid.length > 0 ? valid : entries;
 
   if (durationSec > 0) {
-    const exact = entries.find(
-      (e) => e.duration && Math.abs(e.duration - durationSec) <= 10,
-    );
-    if (exact) {
-      return exact.webpage_url || exact.url || `${fallbackPrefix}${exact.id}`;
-    }
+    list.sort((a, b) => {
+      const diffA = a.duration ? Math.abs(a.duration - durationSec) : 999;
+      const diffB = b.duration ? Math.abs(b.duration - durationSec) : 999;
+      return diffA - diffB;
+    });
   }
 
-  const first = entries[0];
-  return first.webpage_url || first.url || `${fallbackPrefix}${first.id}`;
+  return list
+    .map((e) => e.webpage_url || e.url || (e.id ? `${fallbackPrefix}${e.id}` : ''))
+    .filter(Boolean);
 }
 
 async function searchAndDownloadAudio(track, rawOut) {
   const query = `${track.artist} - ${track.title}`;
 
+  // 1. Intentar en YouTube probando los mejores candidatos por duración
   try {
     const { stdout } = await execFileAsync(config.ytdlpPath, [
-      ...YTDLP_COMMON_ARGS,
+      ...YTDLP_YT_ARGS,
       '--flat-playlist',
       '--dump-single-json',
-      `ytsearch5:${query} audio`,
+      `ytsearch6:${query} audio`,
     ]);
-    const ytEntries = JSON.parse(stdout).entries || [];
-    const ytUrl = pickBestEntry(ytEntries, track.durationSec, 'https://www.youtube.com/watch?v=');
+    const ytUrls = rankEntriesByDuration(
+      JSON.parse(stdout).entries || [],
+      track.durationSec,
+      'https://www.youtube.com/watch?v=',
+    );
 
-    if (ytUrl) {
+    for (const url of ytUrls.slice(0, 3)) {
+      try {
+        await execFileAsync(config.ytdlpPath, [
+          ...YTDLP_YT_ARGS,
+          '-x',
+          '--audio-format',
+          'mp3',
+          '--audio-quality',
+          '0',
+          '-o',
+          rawOut,
+          url,
+        ]);
+        return;
+      } catch {
+        // Probar siguiente candidato o saltar a SoundCloud
+      }
+    }
+  } catch {}
+
+  // 2. Respaldo en SoundCloud saltando pistas protegidas con DRM
+  const { stdout: scOut } = await execFileAsync(config.ytdlpPath, [
+    '--no-playlist',
+    '--flat-playlist',
+    '--dump-single-json',
+    `scsearch10:${query}`,
+  ]);
+  const scUrls = rankEntriesByDuration(
+    JSON.parse(scOut).entries || [],
+    track.durationSec,
+    '',
+  );
+
+  for (const url of scUrls) {
+    try {
       await execFileAsync(config.ytdlpPath, [
-        ...YTDLP_COMMON_ARGS,
+        '--no-playlist',
         '-x',
         '--audio-format',
         'mp3',
@@ -132,37 +173,15 @@ async function searchAndDownloadAudio(track, rawOut) {
         '0',
         '-o',
         rawOut,
-        ytUrl,
+        url,
       ]);
       return;
+    } catch {
+      // Si tiene DRM ("This video is DRM protected"), prueba automáticamente la siguiente
     }
-  } catch {
-    // Respaldo automático en SoundCloud si YouTube bloquea la IP
   }
 
-  const { stdout: scOut } = await execFileAsync(config.ytdlpPath, [
-    '--no-playlist',
-    '--flat-playlist',
-    '--dump-single-json',
-    `scsearch5:${query}`,
-  ]);
-  const scEntries = JSON.parse(scOut).entries || [];
-  const scUrl = pickBestEntry(scEntries, track.durationSec, '');
-  if (!scUrl) {
-    throw new Error('No encontré el audio disponible para descargar.');
-  }
-
-  await execFileAsync(config.ytdlpPath, [
-    '--no-playlist',
-    '-x',
-    '--audio-format',
-    'mp3',
-    '--audio-quality',
-    '0',
-    '-o',
-    rawOut,
-    scUrl,
-  ]);
+  throw new Error('No encontré una versión libre de derechos para descargar.');
 }
 
 export async function downloadTaggedTrack(track) {
