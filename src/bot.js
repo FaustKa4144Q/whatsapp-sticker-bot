@@ -1,3 +1,4 @@
+import http from 'node:http';
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
@@ -9,11 +10,65 @@ import { config } from './config.js';
 import { convertToSticker } from './stickerConverter.js';
 import { extractXStatusUrl, fetchMediaFromX } from './xExtractor.js';
 
-// 👇 PON AQUÍ TU NÚMERO CON CÓDIGO DE PAÍS (sin el signo + ni espacios)
-const NUMERO_TELEFONO = '5212215142970';
-
 const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
+
+let ultimoQR = null;
+let estadoConexion = 'Iniciando bot...';
+
+// Mini servidor web para mostrar el QR limpio
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  if (estadoConexion === 'Conectado') {
+    res.end(`
+      <html>
+        <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#4ade80;text-align:center;">
+          <h1>✅ ¡Bot conectado a WhatsApp correctamente!<br><span style="font-size:18px;color:#ccc;">Ya puedes cerrar esta página.</span></h1>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  if (!ultimoQR) {
+    res.end(`
+      <html>
+        <head><meta http-equiv="refresh" content="3"></head>
+        <body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#fff;">
+          <h2>⏳ Generando código QR, espera un momento...</h2>
+        </body>
+      </html>
+    `);
+    return;
+  }
+
+  res.end(`
+    <html>
+      <head>
+        <meta http-equiv="refresh" content="15">
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+      </head>
+      <body style="display:flex;flex-direction:column;justify-content:center;align-items:center;height:100vh;margin:0;font-family:sans-serif;background:#ffffff;color:#111;">
+        <h2 style="margin-bottom:20px;">Escanea este QR con WhatsApp</h2>
+        <div id="qrcode" style="padding:20px;background:#fff;border:4px solid #111;border-radius:12px;"></div>
+        <p style="margin-top:15px;color:#555;">La página se actualiza sola cada 15 segundos</p>
+        <script>
+          new QRCode(document.getElementById("qrcode"), {
+            text: ${JSON.stringify(ultimoQR)},
+            width: 320,
+            height: 320,
+            correctLevel: QRCode.CorrectLevel.L
+          });
+        </script>
+      </body>
+    </html>
+  `);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`[StickerBot] Servidor web del QR listo en puerto ${PORT}`);
+});
 
 function unwrapMessage(message) {
   let current = message;
@@ -100,9 +155,8 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-    const authorized = msg.key.fromMe || (await isAuthorizedChat(sock, remoteJid));
+  const authorized = msg.key.fromMe || (await isAuthorizedChat(sock, remoteJid));
   if (!authorized) return;
-
 
   const mediaSpec = detectMediaInput(content, text);
   if (!mediaSpec) return;
@@ -188,29 +242,19 @@ export async function startBot() {
     browser: ['Ubuntu', 'Chrome', '20.0.04'],
   });
 
-  let codigoSolicitado = false;
-
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async (update) => {
+  sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !codigoSolicitado && !sock.authState.creds.registered) {
-      codigoSolicitado = true;
-      try {
-        const code = await sock.requestPairingCode(NUMERO_TELEFONO);
-        console.log('\n========================================');
-        console.log(`TU CÓDIGO DE VINCULACIÓN ES: ${code}`);
-        console.log('========================================\n');
-      } catch (err) {
-        console.error('[StickerBot] Error al pedir el código:', err);
-        codigoSolicitado = false;
-      }
+    if (qr) {
+      ultimoQR = qr;
+      estadoConexion = 'Esperando QR';
+      console.log('[StickerBot] Nuevo QR generado en la página web.');
     }
-
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      estadoConexion = 'Reconectando...';
       console.warn(
         `[StickerBot] Conexión cerrada (code=${statusCode}). Reconectar: ${shouldReconnect}`,
       );
@@ -218,15 +262,9 @@ export async function startBot() {
         setTimeout(() => startBot(), 3000);
       }
     } else if (connection === 'open') {
+      ultimoQR = null;
+      estadoConexion = 'Conectado';
       console.log('[StickerBot] Conectado a WhatsApp correctamente.');
-      if (
-        config.allowedGroupJids.length === 0 &&
-        config.allowedGroupNames.length === 0
-      ) {
-        console.log(
-          '[StickerBot] Sin grupos configurados aún. Envía "!id" en tu grupo para obtener su JID.',
-        );
-      }
     }
   });
 
