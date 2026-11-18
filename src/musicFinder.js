@@ -18,41 +18,79 @@ const YTDLP_COMMON_ARGS = [
   'youtube:player_client=android_vr,ios,web',
 ];
 
-export async function searchTracks(query) {
-  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=20&country=MX`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Error buscando música (${res.status})`);
+function scoreRelevance(track, query) {
+  const words = query
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .split(/\s+/)
+    .filter((w) => w.length > 2);
 
+  const haystack = `${track.title} ${track.artist}`
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  let hits = 0;
+  for (const w of words) {
+    if (haystack.includes(w)) hits++;
+  }
+  return hits;
+}
+
+async function searchDeezer(query) {
+  const res = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=15`);
+  if (!res.ok) return [];
   const data = await res.json();
+  return (data.data || []).map((item) => ({
+    title: (item.title || '').trim(),
+    artist: (item.artist?.name || '').trim(),
+    album: (item.album?.title || item.title || '').trim(),
+    durationSec: Number(item.duration || 0),
+    artworkUrl: item.album?.cover_xl || item.album?.cover_big || '',
+  }));
+}
+
+async function searchItunes(query) {
+  const res = await fetch(
+    `https://itunes.apple.com/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=15&country=MX`,
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.results || []).map((item) => ({
+    title: (item.trackName || '').trim(),
+    artist: (item.artistName || '').trim(),
+    album: (item.collectionName || item.trackName || '').trim(),
+    durationSec: Math.round((item.trackTimeMillis || 0) / 1000),
+    artworkUrl: (item.artworkUrl100 || '').replace('100x100bb', '600x600bb'),
+  }));
+}
+
+export async function searchTracks(query) {
+  let rawResults = await searchDeezer(query).catch(() => []);
+  if (rawResults.length === 0) {
+    rawResults = await searchItunes(query).catch(() => []);
+  }
+
   const userWantsCover = JUNK_REGEX.test(query);
   const seen = new Set();
   const clean = [];
 
-  for (const item of data.results || []) {
-    const title = (item.trackName || '').trim();
-    const artist = (item.artistName || '').trim();
-    if (!title || !artist) continue;
-
-    if (!userWantsCover && (JUNK_REGEX.test(title) || JUNK_REGEX.test(artist))) {
+  for (const item of rawResults) {
+    if (!item.title || !item.artist) continue;
+    if (!userWantsCover && (JUNK_REGEX.test(item.title) || JUNK_REGEX.test(item.artist))) {
       continue;
     }
 
-    const key = `${title.toLowerCase()}|${artist.toLowerCase()}`;
+    const key = `${item.title.toLowerCase()}|${item.artist.toLowerCase()}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    clean.push({
-      title,
-      artist,
-      album: (item.collectionName || title).trim(),
-      durationSec: Math.round((item.trackTimeMillis || 0) / 1000),
-      artworkUrl: (item.artworkUrl100 || '').replace('100x100bb', '600x600bb'),
-    });
-
-    if (clean.length === 5) break;
+    clean.push(item);
   }
 
-  return clean;
+  clean.sort((a, b) => scoreRelevance(b, query) - scoreRelevance(a, query));
+  return clean.slice(0, 5);
 }
 
 function pickBestEntry(entries, durationSec, fallbackPrefix) {
@@ -74,7 +112,6 @@ function pickBestEntry(entries, durationSec, fallbackPrefix) {
 async function searchAndDownloadAudio(track, rawOut) {
   const query = `${track.artist} - ${track.title}`;
 
-  // 1. Intento principal en YouTube con cliente móvil y runtime Node
   try {
     const { stdout } = await execFileAsync(config.ytdlpPath, [
       ...YTDLP_COMMON_ARGS,
@@ -100,10 +137,9 @@ async function searchAndDownloadAudio(track, rawOut) {
       return;
     }
   } catch {
-    // Si YouTube bloquea la IP del servidor ("Sign in to confirm"), pasamos a SoundCloud
+    // Respaldo automático en SoundCloud si YouTube bloquea la IP
   }
 
-  // 2. Respaldo automático en SoundCloud (sin bloqueos de bot en Railway)
   const { stdout: scOut } = await execFileAsync(config.ytdlpPath, [
     '--no-playlist',
     '--flat-playlist',
