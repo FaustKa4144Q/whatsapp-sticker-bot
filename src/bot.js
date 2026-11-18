@@ -12,6 +12,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { config } from './config.js';
+import { downloadTaggedTrack, searchTracks } from './musicFinder.js';
 import { buildPdfFromImages } from './pdfBuilder.js';
 import { convertToSticker } from './stickerConverter.js';
 
@@ -21,6 +22,8 @@ const groupSubjectCache = new Map();
 const pendingLinks = new Map();
 const telegramLinks = new Map();
 const pdfSessions = new Map();
+const musicSearches = new Map();
+const waitingMusicQuery = new Set();
 
 let ultimoQR = null;
 let estadoConexion = 'Iniciando bot...';
@@ -156,12 +159,28 @@ async function processWAUrl(sock, jid, msg, url, action) {
   }
 }
 
+async function handleWAMusicSearch(sock, jid, msg, query) {
+  await react(sock, jid, msg.key, '🔍');
+  try {
+    const tracks = await searchTracks(query);
+    if (tracks.length === 0) {
+      await sock.sendMessage(jid, { text: '❌ No encontré esa canción.' }, { quoted: msg });
+      return;
+    }
+    musicSearches.set(jid, tracks);
+    const list = tracks.map((t, i) => `${i + 1}️⃣ *${t.title}* - ${t.artist}\n   💿 _${t.album}_`).join('\n\n');
+    await sock.sendMessage(jid, { text: `🎵 *Resultados para "${query}":*\n\n${list}\n\nResponde con el número (*1* al *${tracks.length}*) para descargar con carátula.` }, { quoted: msg });
+  } catch (err) {
+    await sock.sendMessage(jid, { text: `Error buscando: ${err.message}` }, { quoted: msg });
+  }
+}
+
 async function handleWAMessage(sock, msg) {
   const jid = msg.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return;
   const c = unwrapMessage(msg.message);
   if (!c) return;
-  if (msg.key.fromMe && (c.stickerMessage || c.videoMessage || c.audioMessage || c.documentMessage?.mimetype === 'application/pdf')) return;
+  if (msg.key.fromMe && (c.stickerMessage || c.videoMessage || c.audioMessage || c.documentMessage)) return;
 
   const text = extractText(c);
   if (text === '!id' && jid.endsWith('@g.us')) {
@@ -170,6 +189,44 @@ async function handleWAMessage(sock, msg) {
   }
 
   if (!(msg.key.fromMe || (await isAuthorizedChat(sock, jid)))) return;
+
+  // --- MODO MÚSICA EN WHATSAPP ---
+  if (/^!musica\b/i.test(text)) {
+    const query = text.replace(/^!musica\s*/i, '').trim();
+    if (!query) {
+      waitingMusicQuery.add(jid);
+      await sock.sendMessage(jid, { text: '🎵 *Modo Música activado*\nEscribe el nombre de la canción (y el artista si quieres):' }, { quoted: msg });
+      return;
+    }
+    waitingMusicQuery.delete(jid);
+    await handleWAMusicSearch(sock, jid, msg, query);
+    return;
+  }
+
+  if (waitingMusicQuery.has(jid) && text && !text.startsWith('!')) {
+    waitingMusicQuery.delete(jid);
+    await handleWAMusicSearch(sock, jid, msg, text);
+    return;
+  }
+
+  if (/^[1-5]$/.test(text) && musicSearches.has(jid)) {
+    const tracks = musicSearches.get(jid);
+    const idx = Number(text) - 1;
+    if (tracks[idx]) {
+      musicSearches.delete(jid);
+      await react(sock, jid, msg.key, '⏳');
+      try {
+        const { buffer, filename } = await downloadTaggedTrack(tracks[idx]);
+        await sock.sendMessage(jid, { document: buffer, mimetype: 'audio/mpeg', fileName: filename }, { quoted: msg });
+        await react(sock, jid, msg.key, '✅');
+      } catch (err) {
+        await react(sock, jid, msg.key, '❌');
+        await sock.sendMessage(jid, { text: `Error descargando canción: ${err.message}` }, { quoted: msg });
+      }
+      return;
+    }
+  }
+  // --- FIN MODO MÚSICA ---
 
   // --- MODO PDF EN WHATSAPP ---
   if (/^!pdf\b/i.test(text)) {
@@ -259,10 +316,11 @@ async function tgApi(token, method, body) {
   return res.json();
 }
 
-async function tgSendFile(token, method, chatId, field, buffer, filename) {
+async function tgSendFile(token, method, chatId, field, buffer, filename, extra = {}) {
   const form = new FormData();
   form.append('chat_id', String(chatId));
   form.append(field, new Blob([buffer]), filename);
+  for (const [k, v] of Object.entries(extra)) form.append(k, String(v));
   return (await fetch(`https://api.telegram.org/bot${token}/${method}`, { method: 'POST', body: form })).json();
 }
 
@@ -271,6 +329,23 @@ async function tgDownloadPhoto(token, fileId) {
   const fileUrl = `https://api.telegram.org/file/bot${token}/${info.result.file_path}`;
   const res = await fetch(fileUrl);
   return Buffer.from(await res.arrayBuffer());
+}
+
+async function handleTGMusicSearch(token, chatId, msgId, query) {
+  const tracks = await searchTracks(query);
+  if (tracks.length === 0) {
+    await tgApi(token, 'sendMessage', { chat_id: chatId, text: '❌ No encontré esa canción.' });
+    return;
+  }
+  const searchId = Math.random().toString(36).slice(2, 8);
+  musicSearches.set(searchId, tracks);
+  const buttons = tracks.map((t, i) => [{ text: `🎵 ${t.title} - ${t.artist}`, callback_data: `song:${searchId}:${i}` }]);
+  await tgApi(token, 'sendMessage', {
+    chat_id: chatId,
+    text: `Elige la canción que quieres descargar:`,
+    reply_to_message_id: msgId,
+    reply_markup: { inline_keyboard: buttons },
+  });
 }
 
 async function startTelegramBot() {
@@ -287,6 +362,24 @@ async function startTelegramBot() {
           const chatId = String(u.message.chat.id);
           const text = (u.message.text || u.message.caption || '').trim();
 
+          if (/^\/musica\b|^!musica\b/i.test(text)) {
+            const query = text.replace(/^(\/musica|!musica)\s*/i, '').trim();
+            if (!query) {
+              waitingMusicQuery.add(chatId);
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: '🎵 Escribe el nombre de la canción:' });
+            } else {
+              waitingMusicQuery.delete(chatId);
+              await handleTGMusicSearch(token, chatId, u.message.message_id, query);
+            }
+            continue;
+          }
+
+          if (waitingMusicQuery.has(chatId) && text && !text.startsWith('/') && !text.startsWith('!')) {
+            waitingMusicQuery.delete(chatId);
+            await handleTGMusicSearch(token, chatId, u.message.message_id, text);
+            continue;
+          }
+
           if (/^\/pdf\b|^!pdf\b/i.test(text)) {
             const rawName = text.replace(/^(\/pdf|!pdf)\s*/i, '').trim();
             const filename = sanitizeFilename(rawName);
@@ -302,7 +395,7 @@ async function startTelegramBot() {
               await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⚠️ No mandaste ninguna foto.' });
               continue;
             }
-            const waitMsg = await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⏳ Armado PDF...' });
+            const waitMsg = await tgApi(token, 'sendMessage', { chat_id: chatId, text: '⏳ Armando PDF...' });
             try {
               const pdfBuffer = await buildPdfFromImages(session.buffers);
               await tgSendFile(token, 'sendDocument', chatId, 'document', pdfBuffer, session.filename);
@@ -334,9 +427,30 @@ async function startTelegramBot() {
         }
         if (u.callback_query) {
           const cb = u.callback_query;
-          const [action, id] = (cb.data || '').split(':');
-          const url = telegramLinks.get(id);
+          const parts = (cb.data || '').split(':');
           await tgApi(token, 'answerCallbackQuery', { callback_query_id: cb.id });
+
+          if (parts[0] === 'song') {
+            const tracks = musicSearches.get(parts[1]);
+            const track = tracks?.[Number(parts[2])];
+            if (!track) {
+              await tgApi(token, 'editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: '⚠️ Búsqueda caducada.' });
+              continue;
+            }
+            musicSearches.delete(parts[1]);
+            await tgApi(token, 'editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `⏳ Descargando "${track.title}" con carátula...` });
+            try {
+              const { buffer, filename } = await downloadTaggedTrack(track);
+              await tgSendFile(token, 'sendAudio', cb.message.chat.id, 'audio', buffer, filename, { title: track.title, performer: track.artist });
+              await tgApi(token, 'deleteMessage', { chat_id: cb.message.chat.id, message_id: cb.message.message_id });
+            } catch (err) {
+              await tgApi(token, 'editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: `❌ Error: ${err.message}` });
+            }
+            continue;
+          }
+
+          const [action, id] = parts;
+          const url = telegramLinks.get(id);
           if (!url) {
             await tgApi(token, 'editMessageText', { chat_id: cb.message.chat.id, message_id: cb.message.message_id, text: '⚠️ Enlace caducado.' });
             continue;
