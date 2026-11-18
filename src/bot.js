@@ -23,14 +23,13 @@ const groupSubjectCache = new Map();
 const chatStates = new Map();
 const botSentIds = new Set();
 
-
 let ultimoQR = null;
 let estadoConexion = 'Iniciando bot...';
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   if (estadoConexion === 'Conectado') {
-    res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#4ade80;"><h1>✅ Bot conectado</h1></body></html>');
+    res.end('<html><body style="display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#111;color:#4ade80;"><h1>✅ Bot conectado a WhatsApp</h1></body></html>');
     return;
   }
   if (!ultimoQR) {
@@ -158,9 +157,10 @@ async function executeWAUrl(sock, jid, msg, url, action) {
 async function handleWAMessage(sock, msg) {
   const jid = msg.key?.remoteJid;
   if (!jid || jid === 'status@broadcast') return;
+  if (botSentIds.has(msg.key.id)) return;
+
   const c = unwrapMessage(msg.message);
   if (!c) return;
-  if (msg.key.fromMe && (c.stickerMessage || c.videoMessage || c.audioMessage || c.documentMessage)) return;
 
   const text = extractText(c);
   if (text === '!id' && jid.endsWith('@g.us')) {
@@ -170,8 +170,14 @@ async function handleWAMessage(sock, msg) {
 
   const isGroup = jid.endsWith('@g.us');
   const myNum = sock.user?.id?.split(':')[0];
-  const isSelfChat = (myNum && jid.startsWith(myNum)) || config.allowedUserJids.includes(jid);
-  const isAllowedGroup = isGroup && (config.allowedGroupJids.includes(jid) || config.allowedGroupNames.includes(await getGroupSubject(sock, jid)));
+  const isSelfChat =
+    (!isGroup && msg.key.fromMe) ||
+    (myNum && jid.startsWith(myNum)) ||
+    config.allowedUserJids.includes(jid);
+  const isAllowedGroup =
+    isGroup &&
+    (config.allowedGroupJids.includes(jid) ||
+      config.allowedGroupNames.includes(await getGroupSubject(sock, jid)));
 
   if (!isSelfChat && !isAllowedGroup) return;
 
@@ -475,6 +481,17 @@ export async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   const { version } = await fetchLatestBaileysVersion();
   const sock = makeWASocket({ version, logger, auth: state, printQRInTerminal: false, browser: ['Ubuntu', 'Chrome', '20.0.04'] });
+
+  const origSend = sock.sendMessage.bind(sock);
+  sock.sendMessage = async (...args) => {
+    const sent = await origSend(...args);
+    if (sent?.key?.id) {
+      botSentIds.add(sent.key.id);
+      setTimeout(() => botSentIds.delete(sent.key.id), 60000);
+    }
+    return sent;
+  };
+
   sock.ev.on('creds.update', saveCreds);
   sock.ev.on('connection.update', ({ connection, lastDisconnect, qr }) => {
     if (qr) { ultimoQR = qr; estadoConexion = 'Esperando QR'; }
