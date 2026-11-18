@@ -11,6 +11,7 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
+import { askAI, clearAIHistory } from './aiChat.js';
 import { config } from './config.js';
 import { downloadTaggedTrack, searchTracks } from './musicFinder.js';
 import { buildPdfFromImages } from './pdfBuilder.js';
@@ -169,14 +170,13 @@ async function handleWAMessage(sock, msg) {
 
   if (!(msg.key.fromMe || (await isAuthorized(sock, jid)))) return;
 
-  // Cancelar cualquier modo activo
   if (/^!cancelar$/i.test(text)) {
     chatStates.delete(jid);
+    clearAIHistory(jid);
     await sock.sendMessage(jid, { text: '🛑 Listo, operación cancelada.' }, { quoted: msg });
     return;
   }
 
-  // Menú principal
   if (/^!menu$/i.test(text)) {
     chatStates.set(jid, { mode: 'MAIN_MENU' });
     await sock.sendMessage(jid, {
@@ -184,27 +184,37 @@ async function handleWAMessage(sock, msg) {
             '1️⃣ Descargar video / audio de enlace\n' +
             '2️⃣ Buscar música con carátula (MP3)\n' +
             '3️⃣ Armar PDF con fotos (Tarea)\n' +
-            '4️⃣ Hacer sticker\n\n' +
-            'Responde con un número (*1-4*) o escribe *!cancelar*.',
+            '4️⃣ Hacer sticker\n' +
+            '5️⃣ Charlar con IA\n\n' +
+            'Responde con un número (*1-5*) o escribe *!cancelar*.',
     }, { quoted: msg });
     return;
   }
 
   const state = chatStates.get(jid);
 
-  // 1. Si hay foto o video recibido
+  // Modo charla con IA activo
+  if (state?.mode === 'AI_CHAT' && text) {
+    await react(sock, jid, msg.key, '🤖');
+    try {
+      const reply = await askAI(jid, text);
+      await sock.sendMessage(jid, { text: reply }, { quoted: msg });
+    } catch (err) {
+      await sock.sendMessage(jid, { text: `❌ Error IA: ${err.message}` }, { quoted: msg });
+    }
+    return;
+  }
+
   const media = detectMedia(c);
   if (media) {
     const buffer = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
 
-    // Si ya está juntando hojas para un PDF
     if (state?.mode === 'PDF_COLLECT' && media.isImage) {
       state.buffers.push(buffer);
       await react(sock, jid, msg.key, '📄');
       return;
     }
 
-    // Si eligió "4. Hacer sticker" desde el menú
     if (state?.mode === 'WAIT_STICKER') {
       chatStates.delete(jid);
       await react(sock, jid, msg.key, '⏳');
@@ -214,7 +224,6 @@ async function handleWAMessage(sock, msg) {
       return;
     }
 
-    // Si mandó foto/video directo sin comando -> Dar opciones
     chatStates.set(jid, { mode: 'MEDIA_OPTIONS', media: { ...media, buffer } });
     const opts = media.isImage
       ? '1️⃣ Hacer sticker\n2️⃣ Iniciar PDF con esta foto\n\nResponde *1*, *2* o *!cancelar*'
@@ -223,7 +232,6 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // 2. Si hay un enlace recibido
   const url = extractUrl(text);
   if (url) {
     if (state?.mode === 'WAIT_STICKER') {
@@ -237,10 +245,8 @@ async function handleWAMessage(sock, msg) {
     return;
   }
 
-  // Si no hay ningún modo activo, el bot NO hace nada
   if (!state) return;
 
-  // 3. Procesar respuestas según el modo activo
   if (state.mode === 'MAIN_MENU') {
     if (text === '1') {
       chatStates.set(jid, { mode: 'WAIT_LINK' });
@@ -254,6 +260,10 @@ async function handleWAMessage(sock, msg) {
     } else if (text === '4') {
       chatStates.set(jid, { mode: 'WAIT_STICKER' });
       await sock.sendMessage(jid, { text: '🖼️ Manda la foto, video o enlace que quieres hacer sticker:' }, { quoted: msg });
+    } else if (text === '5') {
+      clearAIHistory(jid);
+      chatStates.set(jid, { mode: 'AI_CHAT' });
+      await sock.sendMessage(jid, { text: '🤖 *Modo IA activado.* Escríbeme lo que quieras (para salir manda *!cancelar*).' }, { quoted: msg });
     }
     return;
   }
@@ -366,6 +376,7 @@ async function startTelegramBot() {
 
           if (/^(\/cancelar|!cancelar)$/i.test(text)) {
             chatStates.delete(chatId);
+            clearAIHistory(chatId);
             await tgApi(token, 'sendMessage', { chat_id: chatId, text: '🛑 Operación cancelada.' });
             continue;
           }
@@ -381,13 +392,23 @@ async function startTelegramBot() {
                   [{ text: '🎵 Buscar música con carátula', callback_data: 'menu:music' }],
                   [{ text: '📄 Armar PDF con fotos', callback_data: 'menu:pdf' }],
                   [{ text: '🖼️ Hacer sticker', callback_data: 'menu:sticker' }],
+                  [{ text: '🤖 Charlar con IA', callback_data: 'menu:ai' }],
                 ],
               },
             });
             continue;
           }
 
-          // Foto o video en Telegram
+          if (state?.mode === 'AI_CHAT' && text) {
+            try {
+              const reply = await askAI(chatId, text);
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: reply });
+            } catch (err) {
+              await tgApi(token, 'sendMessage', { chat_id: chatId, text: `❌ Error IA: ${err.message}` });
+            }
+            continue;
+          }
+
           if (u.message.photo || u.message.video) {
             const isImage = Boolean(u.message.photo);
             const fileId = isImage ? u.message.photo[u.message.photo.length - 1].file_id : u.message.video.file_id;
@@ -412,7 +433,6 @@ async function startTelegramBot() {
             continue;
           }
 
-          // Enlace en Telegram
           const url = extractUrl(text);
           if (url) {
             chatStates.set(chatId, { mode: 'LINK_OPTIONS', url });
@@ -480,6 +500,10 @@ async function startTelegramBot() {
             } else if (val === 'sticker') {
               chatStates.set(chatId, { mode: 'WAIT_STICKER' });
               await tgApi(token, 'editMessageText', { chat_id: chatId, message_id: msgId, text: '🖼️ Manda la foto, video o enlace:' });
+            } else if (val === 'ai') {
+              clearAIHistory(chatId);
+              chatStates.set(chatId, { mode: 'AI_CHAT' });
+              await tgApi(token, 'editMessageText', { chat_id: chatId, message_id: msgId, text: '🤖 Modo IA activado. Escríbeme lo que quieras (para salir manda /cancelar).' });
             }
           } else if (type === 'media' && state?.media) {
             const m = state.media;
