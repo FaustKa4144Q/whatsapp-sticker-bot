@@ -1,10 +1,5 @@
 import 'dotenv/config';
 
-/**
- * Parse a comma-separated environment variable into a trimmed string array.
- * @param {string | undefined} raw
- * @returns {string[]}
- */
 function parseCsvList(raw) {
   if (!raw) return [];
   return raw
@@ -14,11 +9,13 @@ function parseCsvList(raw) {
 }
 
 export const config = {
-  packName: process.env.STICKER_PACK_NAME || 'dcss-stickers',
-  author: process.env.STICKER_AUTHOR || 'dcss',
+  // Aquí puedes cambiar el nombre del paquete y autor que saldrá en tus stickers:
+  packName: process.env.STICKER_PACK_NAME || 'Mis Stickers',
+  author: process.env.STICKER_AUTHOR || 'StickerBot',
   allowedGroupJids: parseCsvList(process.env.ALLOWED_GROUP_JIDS),
   allowedGroupNames: parseCsvList(process.env.ALLOWED_GROUP_NAMES),
-  allowedUserJids: parseCsvList(process.env.ALLOWED_USER_JIDS),
+  // 👇 PON TU NÚMERO AQUÍ (deja el @s.whatsapp.net al final):
+  allowedUserJids: ['5212215142070@s.whatsapp.net'],
   maxVideoSeconds: Math.max(1, Number(process.env.MAX_VIDEO_SECONDS) || 8),
   ytdlpPath: process.env.YTDLP_PATH || 'yt-dlp',
 };
