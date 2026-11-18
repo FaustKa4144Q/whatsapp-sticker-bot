@@ -1,4 +1,5 @@
 const histories = new Map();
+let cachedModel = null;
 
 export function clearAIHistory(chatId) {
   histories.delete(chatId);
@@ -21,12 +22,35 @@ Reglas para elegir "action":
 - "download_audio": si manda un enlace y pide solo el audio/mp3 (pon el link en "query").
 - "chat": para cualquier otra charla, duda o comentario normal.`;
 
+async function getBestGroqModel(apiKey) {
+  if (cachedModel) return cachedModel;
+
+  const res = await fetch('https://api.groq.com/openai/v1/models', {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `Error listando modelos (${res.status})`);
+
+  const chatModels = (data.data || [])
+    .map((m) => m.id)
+    .filter((id) => !/whisper|guard|tts|embed|vision/i.test(id));
+
+  cachedModel =
+    chatModels.find((id) => /llama.*70b/i.test(id)) ||
+    chatModels.find((id) => /llama|qwen|gemma|mixtral/i.test(id)) ||
+    chatModels[0];
+
+  if (!cachedModel) throw new Error('No hay modelos de chat disponibles en tu cuenta de Groq.');
+  return cachedModel;
+}
+
 export async function processWithAI(chatId, userText) {
   const apiKey = (process.env.GROQ_API_KEY || '').trim();
   if (!apiKey) {
     throw new Error('No detecto GROQ_API_KEY en Railway.');
   }
 
+  const model = await getBestGroqModel(apiKey);
   const history = histories.get(chatId) || [];
   history.push({ role: 'user', content: userText });
 
@@ -41,7 +65,7 @@ export async function processWithAI(chatId, userText) {
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
+      model,
       messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
       response_format: { type: 'json_object' },
       temperature: 0.7,
@@ -50,6 +74,7 @@ export async function processWithAI(chatId, userText) {
 
   const data = await res.json();
   if (!res.ok) {
+    cachedModel = null;
     throw new Error(data.error?.message || `Groq HTTP ${res.status}`);
   }
 
