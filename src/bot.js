@@ -1,4 +1,9 @@
+import { execFile } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
@@ -10,6 +15,7 @@ import { config } from './config.js';
 import { convertToSticker } from './stickerConverter.js';
 import { extractXStatusUrl, fetchMediaFromX } from './xExtractor.js';
 
+const execFileAsync = promisify(execFile);
 const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
 
@@ -134,6 +140,25 @@ async function react(sock, jid, key, emoji) {
   }
 }
 
+// Función para descargar videos con yt-dlp
+async function downloadVideo(url) {
+  const tempPath = path.join(os.tmpdir(), `wsb-vid-${Date.now()}.mp4`);
+  try {
+    await execFileAsync(config.ytdlpPath, [
+      '-f',
+      'b[ext=mp4][filesize<45M]/b[ext=mp4]/b',
+      '--merge-output-format',
+      'mp4',
+      '-o',
+      tempPath,
+      url,
+    ]);
+    return await fs.promises.readFile(tempPath);
+  } finally {
+    await fs.promises.unlink(tempPath).catch(() => {});
+  }
+}
+
 async function handleMessage(sock, msg) {
   const remoteJid = msg.key?.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
@@ -141,7 +166,7 @@ async function handleMessage(sock, msg) {
   const content = unwrapMessage(msg.message);
   if (!content) return;
 
-  if (msg.key.fromMe && content.stickerMessage) return;
+  if (msg.key.fromMe && (content.stickerMessage || content.videoMessage)) return;
 
   const text = extractText(content);
 
@@ -157,6 +182,39 @@ async function handleMessage(sock, msg) {
 
   const authorized = msg.key.fromMe || (await isAuthorizedChat(sock, remoteJid));
   if (!authorized) return;
+
+  // Comando !video <link> para descargar el video completo
+  if (/^!video\b/i.test(text)) {
+    const urlMatch = text.match(/https?:\/\/[^\s]+/i);
+    if (!urlMatch) {
+      await sock.sendMessage(
+        remoteJid,
+        { text: 'Pasa el link junto al comando. Ejemplo:\n!video https://x.com/...' },
+        { quoted: msg },
+      );
+      return;
+    }
+
+    await react(sock, remoteJid, msg.key, '⏳');
+    try {
+      const videoBuffer = await downloadVideo(urlMatch[0]);
+      await sock.sendMessage(
+        remoteJid,
+        { video: videoBuffer },
+        { quoted: msg },
+      );
+      await react(sock, remoteJid, msg.key, '✅');
+    } catch (err) {
+      console.error('[StickerBot] Error descargando video:', err);
+      await react(sock, remoteJid, msg.key, '❌');
+      await sock.sendMessage(
+        remoteJid,
+        { text: `No pude descargar el video: ${err.message}` },
+        { quoted: msg },
+      );
+    }
+    return;
+  }
 
   const mediaSpec = detectMediaInput(content, text);
   if (!mediaSpec) return;
