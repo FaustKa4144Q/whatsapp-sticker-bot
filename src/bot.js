@@ -5,18 +5,16 @@ import makeWASocket, {
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
-import qrcode from 'qrcode-terminal';
 import { config } from './config.js';
 import { convertToSticker } from './stickerConverter.js';
 import { extractXStatusUrl, fetchMediaFromX } from './xExtractor.js';
 
+// 👇 PON AQUÍ TU NÚMERO CON CÓDIGO DE PAÍS (sin el signo + ni espacios)
+const NUMERO_TELEFONO = '5212215142970';
+
 const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
 
-/**
- * Unwrap nested ephemeral/view-once message wrappers from Baileys.
- * @param {import('@whiskeysockets/baileys').proto.IMessage | undefined} message
- */
 function unwrapMessage(message) {
   let current = message;
   while (current) {
@@ -33,11 +31,6 @@ function unwrapMessage(message) {
   return current;
 }
 
-/**
- * Extract plain text or caption from an unwrapped message.
- * @param {import('@whiskeysockets/baileys').proto.IMessage} content
- * @returns {string}
- */
 function extractText(content) {
   return (
     content.conversation ||
@@ -49,12 +42,6 @@ function extractText(content) {
   ).trim();
 }
 
-/**
- * Resolve and cache a WhatsApp group's subject name.
- * @param {ReturnType<typeof makeWASocket>} sock
- * @param {string} jid
- * @returns {Promise<string>}
- */
 async function getGroupSubject(sock, jid) {
   if (groupSubjectCache.has(jid)) {
     return groupSubjectCache.get(jid);
@@ -69,12 +56,6 @@ async function getGroupSubject(sock, jid) {
   }
 }
 
-/**
- * Check whether a chat JID is authorized to use the bot.
- * @param {ReturnType<typeof makeWASocket>} sock
- * @param {string} remoteJid
- * @returns {Promise<boolean>}
- */
 async function isAuthorizedChat(sock, remoteJid) {
   if (!remoteJid || remoteJid === 'status@broadcast') return false;
 
@@ -90,13 +71,6 @@ async function isAuthorizedChat(sock, remoteJid) {
   return config.allowedUserJids.includes(remoteJid);
 }
 
-/**
- * Send a reaction emoji to a message (best-effort).
- * @param {ReturnType<typeof makeWASocket>} sock
- * @param {string} jid
- * @param {import('@whiskeysockets/baileys').proto.IMessageKey} key
- * @param {string} emoji
- */
 async function react(sock, jid, key, emoji) {
   try {
     await sock.sendMessage(jid, { react: { text: emoji, key } });
@@ -105,11 +79,6 @@ async function react(sock, jid, key, emoji) {
   }
 }
 
-/**
- * Process a single incoming WhatsApp message.
- * @param {ReturnType<typeof makeWASocket>} sock
- * @param {import('@whiskeysockets/baileys').proto.IWebMessageInfo} msg
- */
 async function handleMessage(sock, msg) {
   const remoteJid = msg.key?.remoteJid;
   if (!remoteJid || remoteJid === 'status@broadcast') return;
@@ -117,12 +86,10 @@ async function handleMessage(sock, msg) {
   const content = unwrapMessage(msg.message);
   if (!content) return;
 
-  // Prevent infinite loop on stickers sent by the bot itself
   if (msg.key.fromMe && content.stickerMessage) return;
 
   const text = extractText(content);
 
-  // Helper command to discover the group JID during initial setup
   if (text === '!id' && remoteJid.endsWith('@g.us')) {
     const subject = await getGroupSubject(sock, remoteJid);
     await sock.sendMessage(
@@ -185,11 +152,6 @@ async function handleMessage(sock, msg) {
   }
 }
 
-/**
- * Determine whether an incoming message contains convertible media or an X link.
- * @param {import('@whiskeysockets/baileys').proto.IMessage} content
- * @param {string} text
- */
 function detectMediaInput(content, text) {
   if (content.imageMessage) {
     return { type: 'media', isAnimated: false, ext: 'jpg' };
@@ -213,9 +175,6 @@ function detectMediaInput(content, text) {
   return null;
 }
 
-/**
- * Start the WhatsApp socket client with auto-reconnect.
- */
 export async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
   const { version } = await fetchLatestBaileysVersion();
@@ -225,16 +184,29 @@ export async function startBot() {
     logger,
     auth: state,
     printQRInTerminal: false,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
   });
+
+  let codigoSolicitado = false;
 
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) {
-      console.log('\nEscanea este QR con WhatsApp (Dispositivos vinculados):');
-      qrcode.generate(qr, { small: true });
+
+    if (qr && !codigoSolicitado && !sock.authState.creds.registered) {
+      codigoSolicitado = true;
+      try {
+        const code = await sock.requestPairingCode(NUMERO_TELEFONO);
+        console.log('\n========================================');
+        console.log(`TU CÓDIGO DE VINCULACIÓN ES: ${code}`);
+        console.log('========================================\n');
+      } catch (err) {
+        console.error('[StickerBot] Error al pedir el código:', err);
+        codigoSolicitado = false;
+      }
     }
+
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
