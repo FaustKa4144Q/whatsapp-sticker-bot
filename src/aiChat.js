@@ -21,17 +21,18 @@ Reglas para elegir "action":
 - "download_audio": si manda un enlace y pide solo el audio/mp3 (pon el link en "query").
 - "chat": para cualquier otra charla, duda o comentario normal.`;
 
-async function callGroq(history) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) throw new Error('Sin GROQ_API_KEY');
+export async function processWithAI(chatId, userText) {
+  const apiKey = (process.env.GROQ_API_KEY || '').trim();
+  if (!apiKey) {
+    throw new Error('No detecto GROQ_API_KEY en Railway.');
+  }
 
-  const messages = [
-    { role: 'system', content: SYSTEM_PROMPT },
-    ...history.map((m) => ({
-      role: m.role === 'model' ? 'assistant' : 'user',
-      content: m.text,
-    })),
-  ];
+  const history = histories.get(chatId) || [];
+  history.push({ role: 'user', content: userText });
+
+  if (history.length > 12) {
+    history.splice(0, history.length - 12);
+  }
 
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
@@ -41,59 +42,18 @@ async function callGroq(history) {
     },
     body: JSON.stringify({
       model: 'llama-3.3-70b-versatile',
-      messages,
+      messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...history],
       response_format: { type: 'json_object' },
       temperature: 0.7,
     }),
   });
 
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Groq HTTP ${res.status}`);
-  return data.choices?.[0]?.message?.content || '{}';
-}
-
-async function callGemini(history) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('Sin GEMINI_API_KEY');
-
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: history.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
-        generationConfig: { responseMimeType: 'application/json' },
-      }),
-    },
-  );
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error?.message || `Gemini HTTP ${res.status}`);
-  return data.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-}
-
-export async function processWithAI(chatId, userText) {
-  const history = histories.get(chatId) || [];
-  history.push({ role: 'user', text: userText });
-
-  if (history.length > 12) {
-    history.splice(0, history.length - 12);
+  if (!res.ok) {
+    throw new Error(data.error?.message || `Groq HTTP ${res.status}`);
   }
 
-  let rawText;
-  if (process.env.GROQ_API_KEY) {
-    try {
-      rawText = await callGroq(history);
-    } catch (err) {
-      if (process.env.GEMINI_API_KEY) rawText = await callGemini(history);
-      else throw err;
-    }
-  } else {
-    rawText = await callGemini(history);
-  }
-
+  const rawText = data.choices?.[0]?.message?.content || '{}';
   let parsed;
   try {
     parsed = JSON.parse(rawText);
@@ -102,7 +62,7 @@ export async function processWithAI(chatId, userText) {
   }
 
   const replyText = parsed.reply || 'Listo.';
-  history.push({ role: 'model', text: replyText });
+  history.push({ role: 'assistant', content: replyText });
   histories.set(chatId, history);
 
   return {
