@@ -100,8 +100,9 @@ async function handleMessage(sock, msg) {
     return;
   }
 
-  const authorized = await isAuthorizedChat(sock, remoteJid);
+    const authorized = msg.key.fromMe || (await isAuthorizedChat(sock, remoteJid));
   if (!authorized) return;
+
 
   const mediaSpec = detectMediaInput(content, text);
   if (!mediaSpec) return;
