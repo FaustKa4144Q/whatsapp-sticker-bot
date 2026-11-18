@@ -1,5 +1,5 @@
 const histories = new Map();
-let cachedModel = null;
+let cachedModels = [];
 
 export function clearAIHistory(chatId) {
   histories.delete(chatId);
@@ -61,8 +61,8 @@ const VALID_ACTIONS = new Set([
   'clear_reminders',
 ]);
 
-async function getBestGroqModel(apiKey) {
-  if (cachedModel) return cachedModel;
+async function getValidChatModels(apiKey) {
+  if (cachedModels.length > 0) return cachedModels;
 
   const res = await fetch('https://api.groq.com/openai/v1/models', {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -72,20 +72,33 @@ async function getBestGroqModel(apiKey) {
     throw new Error(data.error?.message || `Error listando modelos (${res.status})`);
   }
 
-  const chatModels = (data.data || [])
-    .map((m) => m.id)
-    .filter((id) => !/whisper|guard|tts|embed|vision/i.test(id));
+  const allIds = (data.data || []).map((m) => m.id);
 
-  cachedModel =
-    chatModels.find((id) => /llama-3\.1-8b-instant/i.test(id)) ||
-    chatModels.find((id) => /llama.*8b|llama.*70b/i.test(id)) ||
-    chatModels.find((id) => /llama|gemma|mixtral/i.test(id)) ||
-    chatModels[0];
+  // Solo modelos reales de chat, descartando voz (orpheus/whisper), guard, vision, etc.
+  const valid = allIds.filter(
+    (id) =>
+      /^(llama|meta-llama|openai\/gpt-oss|gemma|mixtral)/i.test(id) &&
+      !/whisper|guard|tts|embed|vision|orpheus|safeguard/i.test(id),
+  );
 
-  if (!cachedModel) {
-    throw new Error('No hay modelos de chat disponibles en tu cuenta de Groq.');
+  // Ordenar poniendo primero los más rápidos y estables
+  valid.sort((a, b) => {
+    const score = (id) => {
+      if (/llama-3\.1-8b-instant/i.test(id)) return 1;
+      if (/llama-3\.3-70b/i.test(id)) return 2;
+      if (/gpt-oss-20b/i.test(id)) return 3;
+      if (/llama/i.test(id)) return 4;
+      return 5;
+    };
+    return score(a) - score(b);
+  });
+
+  if (valid.length === 0) {
+    throw new Error(`No encontré modelos de chat compatibles. Disponibles: ${allIds.join(', ')}`);
   }
-  return cachedModel;
+
+  cachedModels = valid;
+  return cachedModels;
 }
 
 function parseAIResponse(rawText) {
@@ -113,7 +126,7 @@ export async function processWithAI(chatId, userText) {
     throw new Error('No detecto GROQ_API_KEY en Railway.');
   }
 
-  const model = await getBestGroqModel(apiKey);
+  const models = await getValidChatModels(apiKey);
   const history = histories.get(chatId) || [];
   history.push({ role: 'user', content: userText });
 
@@ -121,24 +134,42 @@ export async function processWithAI(chatId, userText) {
     history.splice(0, history.length - 8);
   }
 
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'system', content: buildSystemPrompt() }, ...history],
-      max_tokens: 500,
-      temperature: 0.7,
-    }),
-  });
+  let data = null;
+  let lastError = null;
 
-  const data = await res.json();
-  if (!res.ok) {
-    cachedModel = null;
-    throw new Error(data.error?.message || `Groq HTTP ${res.status}`);
+  for (const model of models) {
+    const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: buildSystemPrompt() }, ...history],
+        max_tokens: 500,
+        temperature: 0.7,
+      }),
+    });
+
+    const json = await res.json();
+    if (res.ok) {
+      data = json;
+      break;
+    }
+
+    lastError = json.error?.message || `Groq HTTP ${res.status}`;
+    // Si el modelo pide términos, no existe o se pasó de límite, lo quitamos y probamos el siguiente
+    if (/terms|not exist|access|limit|decommissioned|not supported/i.test(lastError)) {
+      cachedModels = cachedModels.filter((m) => m !== model);
+      continue;
+    }
+    throw new Error(lastError);
+  }
+
+  if (!data) {
+    cachedModels = [];
+    throw new Error(lastError || 'Ningún modelo de Groq respondió.');
   }
 
   const rawText = data.choices?.[0]?.message?.content || '';
