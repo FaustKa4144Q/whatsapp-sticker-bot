@@ -27,25 +27,25 @@ function getMexicoTimeContext() {
 }
 
 function buildSystemPrompt() {
-  return `Eres un asistente personal integrado en WhatsApp y Telegram. Hablas en español de forma natural, directa y relajada (ideal para leer rápido en el celular).
+  return `Eres un asistente personal integrado en WhatsApp y Telegram con herramientas reales para descargar música en MP3, videos, hacer stickers, armar PDFs y poner recordatorios. NUNCA digas que no puedes descargar canciones ni des sermones de derechos de autor; usa tus acciones integradas.
 Fecha y hora actual en México (UTC-6): ${getMexicoTimeContext()}
 
-Analiza el mensaje del usuario y responde SIEMPRE empezando con estas 3 etiquetas exactas:
-ACCION: chat | menu | music | pdf | sticker | download_video | download_audio | reminder | list_reminders | clear_reminders
-QUERY: texto extraído según la acción (o déjalo vacío si no aplica)
-RESPUESTA: tu respuesta natural para el usuario
+Responde SIEMPRE usando exactamente estas 3 líneas (una debajo de otra, sin usar "|"):
+ACCION: chat
+QUERY: 
+RESPUESTA: tu mensaje corto y natural en español
 
-Reglas para elegir ACCION:
-- reminder: si pide que le recuerdes algo, poner una alarma o avisarle a una hora/fecha (ej. "recuérdame en 15 min...", "avísame hoy a las 7pm...", "recuérdame el domingo a las 8am..."). En QUERY pon EXACTAMENTE: FECHA_ISO_MEXICO|TEXTO_DEL_RECORDATORIO (ejemplo: 2026-11-18T19:00:00-06:00|Subir la tarea). Usa siempre zona horaria -06:00.
-- list_reminders: si pregunta qué recordatorios o alarmas tiene pendientes.
-- clear_reminders: si pide borrar o cancelar sus recordatorios pendientes.
-- menu: si pide ver el menú, ayuda, opciones o qué sabes hacer.
-- music: si pide buscar, escuchar o descargar una canción (pon en QUERY el nombre de la canción y artista).
-- pdf: si dice que quiere hacer/armar un PDF o escanear una tarea (pon en QUERY el nombre del archivo si lo mencionó, o déjalo vacío).
-- sticker: si manda un enlace y pide hacerlo sticker (pon el link en QUERY).
-- download_video: si manda un enlace y pide descargar el video (pon el link en QUERY).
-- download_audio: si manda un enlace y pide solo el audio/mp3 (pon el link en QUERY).
-- chat: para cualquier charla, ejemplo, explicación o pregunta normal.`;
+Valores permitidos para ACCION:
+- music: cuando pida buscar, escuchar o descargar una canción en MP3 (incluso si dice "dámela en mp3" refiriéndose a una canción que acaban de mencionar). En QUERY pon "Nombre de la canción Artista" (ej. Yo Perreo Sola Bad Bunny). Si no dijo qué canción quiere aún, usa ACCION: chat y pregúntale cuál busca.
+- reminder: cuando pida que le recuerdes algo o poner alarma. En QUERY pon: FECHA_ISO_MEXICO|TEXTO_DEL_RECORDATORIO (ej. 2026-11-18T19:00:00-06:00|Subir tarea). Usa siempre -06:00.
+- list_reminders: si pregunta qué recordatorios tiene pendientes.
+- clear_reminders: si pide borrar sus recordatorios.
+- menu: si pide ver el menú, ayuda o qué sabes hacer.
+- pdf: si quiere hacer/armar un PDF o escanear tarea (pon en QUERY el nombre del archivo si lo dijo, o déjalo vacío).
+- sticker: si manda un link y pide hacerlo sticker (pon el link en QUERY).
+- download_video: si manda un link y pide descargar video (pon el link en QUERY).
+- download_audio: si manda un link y pide descargar audio (pon el link en QUERY).
+- chat: para saludos, preguntas o plática normal.`;
 }
 
 const VALID_ACTIONS = new Set([
@@ -73,15 +73,12 @@ async function getValidChatModels(apiKey) {
   }
 
   const allIds = (data.data || []).map((m) => m.id);
-
-  // Solo modelos reales de chat, descartando voz (orpheus/whisper), guard, vision, etc.
   const valid = allIds.filter(
     (id) =>
       /^(llama|meta-llama|openai\/gpt-oss|gemma|mixtral)/i.test(id) &&
       !/whisper|guard|tts|embed|vision|orpheus|safeguard/i.test(id),
   );
 
-  // Ordenar poniendo primero los más rápidos y estables
   valid.sort((a, b) => {
     const score = (id) => {
       if (/llama-3\.1-8b-instant/i.test(id)) return 1;
@@ -94,7 +91,7 @@ async function getValidChatModels(apiKey) {
   });
 
   if (valid.length === 0) {
-    throw new Error(`No encontré modelos de chat compatibles. Disponibles: ${allIds.join(', ')}`);
+    throw new Error('No hay modelos de chat disponibles en tu cuenta de Groq.');
   }
 
   cachedModels = valid;
@@ -102,16 +99,16 @@ async function getValidChatModels(apiKey) {
 }
 
 function parseAIResponse(rawText) {
-  const actionMatch = rawText.match(/^ACCION:\s*([a-z_]+)/im);
-  const queryMatch = rawText.match(/^QUERY:\s*(.*)$/im);
-  const hasReplyTag = /^RESPUESTA:\s*/im.test(rawText);
+  const actionMatch = rawText.match(/ACCION:\s*([a-z_]+)/i);
+  const queryMatch = rawText.match(/QUERY:\s*([\s\S]*?)(?=\s*(?:\|\s*)?RESPUESTA:|$)/i);
+  const replyMatch = rawText.match(/RESPUESTA:\s*([\s\S]*)$/i);
 
   const rawAction = (actionMatch?.[1] || 'chat').toLowerCase().trim();
   const action = VALID_ACTIONS.has(rawAction) ? rawAction : 'chat';
-  const query = (queryMatch?.[1] || '').trim();
-  const reply = hasReplyTag
-    ? rawText.replace(/^[\s\S]*?^RESPUESTA:\s*/im, '').trim()
-    : rawText.trim();
+  const query = (queryMatch?.[1] || '').replace(/\|\s*$/, '').trim();
+  const reply = (replyMatch?.[1] || rawText)
+    .replace(/ACCION:[\s\S]*?RESPUESTA:\s*/i, '')
+    .trim();
 
   return {
     action,
@@ -148,7 +145,7 @@ export async function processWithAI(chatId, userText) {
         model,
         messages: [{ role: 'system', content: buildSystemPrompt() }, ...history],
         max_tokens: 500,
-        temperature: 0.7,
+        temperature: 0.5,
       }),
     });
 
@@ -159,7 +156,6 @@ export async function processWithAI(chatId, userText) {
     }
 
     lastError = json.error?.message || `Groq HTTP ${res.status}`;
-    // Si el modelo pide términos, no existe o se pasó de límite, lo quitamos y probamos el siguiente
     if (/terms|not exist|access|limit|decommissioned|not supported/i.test(lastError)) {
       cachedModels = cachedModels.filter((m) => m !== model);
       continue;
