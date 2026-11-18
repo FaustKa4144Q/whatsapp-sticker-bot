@@ -21,6 +21,8 @@ const execFileAsync = promisify(execFile);
 const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
 const chatStates = new Map();
+const botSentIds = new Set();
+
 
 let ultimoQR = null;
 let estadoConexion = 'Iniciando bot...';
