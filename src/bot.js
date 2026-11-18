@@ -437,4 +437,135 @@ async function startTelegramBot() {
             const linkId = Math.random().toString(36).slice(2, 9);
             telegramLinks.set(linkId, url);
 
-            await tgApi(
+            await tgApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: '¿Qué quieres hacer con este enlace?',
+              reply_to_message_id: update.message.message_id,
+              reply_markup: {
+                inline_keyboard: [
+                  [
+                    { text: '🎬 Video', callback_data: `video:${linkId}` },
+                    { text: '🎵 Solo Audio', callback_data: `audio:${linkId}` },
+                  ],
+                  [{ text: '🖼️ Sticker', callback_data: `sticker:${linkId}` }],
+                ],
+              },
+            });
+          } else if (text === '/start') {
+            await tgApi(token, 'sendMessage', {
+              chat_id: chatId,
+              text: '¡Listo! Mándame un link de X, Instagram, TikTok o YouTube y elige si quieres video, audio o sticker.',
+            });
+          }
+        }
+
+        if (update.callback_query) {
+          const cb = update.callback_query;
+          const chatId = cb.message.chat.id;
+          const msgId = cb.message.message_id;
+          const [action, linkId] = (cb.data || '').split(':');
+          const url = telegramLinks.get(linkId);
+
+          await tgApi(token, 'answerCallbackQuery', {
+            callback_query_id: cb.id,
+            text: 'Procesando...',
+          });
+
+          if (!url) {
+            await tgApi(token, 'editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: '⚠️ Este enlace ya caducó. Mándalo de nuevo.',
+            });
+            continue;
+          }
+
+          telegramLinks.delete(linkId);
+          await tgApi(token, 'editMessageText', {
+            chat_id: chatId,
+            message_id: msgId,
+            text: `⏳ Procesando ${action}...`,
+          });
+
+          try {
+            if (action === 'video') {
+              const { buffer } = await downloadMediaFromUrl(url, 'video');
+              await tgSendFile(token, 'sendVideo', chatId, 'video', buffer, 'video.mp4');
+            } else if (action === 'audio') {
+              const { buffer } = await downloadMediaFromUrl(url, 'audio');
+              await tgSendFile(token, 'sendAudio', chatId, 'audio', buffer, 'audio.mp3');
+            } else if (action === 'sticker') {
+              const { buffer, ext } = await downloadMediaFromUrl(url, 'sticker');
+              const sticker = await convertToSticker(buffer, {
+                isAnimated: true,
+                ext,
+                packName: config.packName,
+                author: config.author,
+                maxVideoSeconds: config.maxVideoSeconds,
+              });
+              await tgSendFile(token, 'sendSticker', chatId, 'sticker', sticker, 'sticker.webp');
+            }
+            await tgApi(token, 'deleteMessage', { chat_id: chatId, message_id: msgId });
+          } catch (err) {
+            await tgApi(token, 'editMessageText', {
+              chat_id: chatId,
+              message_id: msgId,
+              text: `❌ Error: ${err.message}`,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Telegram] Error polling:', err.message);
+      await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+}
+
+// ==========================================
+// 5. ARRANQUE DE AMBOS BOTS
+// ==========================================
+export async function startBot() {
+  startTelegramBot();
+
+  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+  const { version } = await fetchLatestBaileysVersion();
+
+  const sock = makeWASocket({
+    version,
+    logger,
+    auth: state,
+    printQRInTerminal: false,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+  });
+
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', (update) => {
+    const { connection, lastDisconnect, qr } = update;
+    if (qr) {
+      ultimoQR = qr;
+      estadoConexion = 'Esperando QR';
+      console.log('[WhatsApp] Nuevo QR generado en la página web.');
+    }
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      estadoConexion = 'Reconectando...';
+      if (shouldReconnect) {
+        setTimeout(() => startBot(), 3000);
+      }
+    } else if (connection === 'open') {
+      ultimoQR = null;
+      estadoConexion = 'Conectado';
+      console.log('[WhatsApp] Conectado correctamente.');
+    }
+  });
+
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+    for (const msg of messages) {
+      await handleWhatsAppMessage(sock, msg);
+    }
+  });
+}
