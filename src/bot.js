@@ -127,7 +127,7 @@ async function downloadFromUrl(url, mode) {
     try {
       return await downloadTikTok(url, mode);
     } catch {
-      // Si tikwm falla o devuelve vacío, cae automáticamente a yt-dlp
+      // Si TikWM falla o devuelve respuesta vacía, cae automáticamente a yt-dlp
     }
   }
 
@@ -142,14 +142,6 @@ async function downloadFromUrl(url, mode) {
       await fs.promises.unlink(final).catch(() => {});
     }
   }
-  const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
-  try {
-    await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
-    return { buffer: await fs.promises.readFile(temp), ext: 'mp4' };
-  } finally {
-    await fs.promises.unlink(temp).catch(() => {});
-  }
-}
   const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
   try {
     await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
@@ -266,7 +258,6 @@ async function handleWAMessage(slotNum, sock, msg) {
     return;
   }
 
-  // Registrar manualmente el chat personal ("Tú") si se envía !yo desde la propia cuenta
   if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
     saveSelfJid(jid);
     await sock.sendMessage(jid, { text: '✅ Chat personal vinculado correctamente.' }, { quoted: msg });
