@@ -97,17 +97,40 @@ const MENU_TEXT =
   '💬 *Plática libre:* Pregúntame o platícame lo que quieras.';
 
 async function downloadTikTok(url, mode) {
-  const res = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`);
-  const json = await res.json();
+  const res = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      Accept: 'application/json',
+    },
+  });
+  const rawText = await res.text();
+  if (!rawText) throw new Error('Respuesta vacía de TikWM');
+
+  let json;
+  try {
+    json = JSON.parse(rawText);
+  } catch {
+    throw new Error('TikWM no devolvió JSON válido');
+  }
+
   if (json.code !== 0 || !json.data) throw new Error(json.msg || 'Error TikTok');
   const target = mode === 'audio' ? json.data.music : json.data.play;
+  if (!target) throw new Error('Enlace de descarga vacío');
+
   const file = await fetch(target);
   if (!file.ok) throw new Error(`HTTP ${file.status}`);
   return { buffer: Buffer.from(await file.arrayBuffer()), ext: mode === 'audio' ? 'mp3' : 'mp4' };
 }
 
 async function downloadFromUrl(url, mode) {
-  if (/tiktok\.com/i.test(url)) return await downloadTikTok(url, mode);
+  if (/tiktok\.com/i.test(url)) {
+    try {
+      return await downloadTikTok(url, mode);
+    } catch {
+      // Si tikwm falla o devuelve vacío, cae automáticamente a yt-dlp
+    }
+  }
+
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   if (mode === 'audio') {
     const out = path.join(os.tmpdir(), `wsb-${id}.%(ext)s`);
@@ -119,6 +142,14 @@ async function downloadFromUrl(url, mode) {
       await fs.promises.unlink(final).catch(() => {});
     }
   }
+  const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
+  try {
+    await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
+    return { buffer: await fs.promises.readFile(temp), ext: 'mp4' };
+  } finally {
+    await fs.promises.unlink(temp).catch(() => {});
+  }
+}
   const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
   try {
     await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
