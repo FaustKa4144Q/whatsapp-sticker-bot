@@ -29,6 +29,7 @@ const logger = pino({ level: 'warn' });
 const groupSubjectCache = new Map();
 const chatStates = new Map();
 const botSentIds = new Set();
+const sentMessagesStore = new Map();
 
 const SELF_JIDS_FILE = path.join('auth_info', 'self_jids.json');
 
@@ -652,6 +653,7 @@ async function startWASlot(slotNum) {
     auth: state,
     printQRInTerminal: false,
     browser: ['Ubuntu', 'Chrome', `20.0.${slotNum}`],
+    getMessage: async (key) => sentMessagesStore.get(key.id),
   });
   slot.sock = sock;
 
@@ -660,7 +662,13 @@ async function startWASlot(slotNum) {
     const sent = await origSend(...args);
     if (sent?.key?.id) {
       botSentIds.add(sent.key.id);
-      setTimeout(() => botSentIds.delete(sent.key.id), 300000);
+      if (sent.message) {
+        sentMessagesStore.set(sent.key.id, sent.message);
+      }
+      setTimeout(() => {
+        botSentIds.delete(sent.key.id);
+        sentMessagesStore.delete(sent.key.id);
+      }, 300000);
     }
     return sent;
   };
