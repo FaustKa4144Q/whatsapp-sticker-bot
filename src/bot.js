@@ -264,13 +264,15 @@ async function handleWAMessage(slotNum, sock, msg) {
     return;
   }
 
-  const myNum = sock.user?.id?.split(':')[0]?.split('@')[0];
-  const myLid = sock.user?.lid?.split(':')[0]?.split('@')[0];
+const myNum = sock.user?.id?.split(':')[0]?.split('@')[0] || '';
+  const myLid = sock.user?.lid?.split(':')[0]?.split('@')[0] || '';
+  const jidUser = jid.split('@')[0];
+  const last10 = myNum.slice(-10);
 
   const isSelfChat =
     !isGroup &&
-    ((myNum && jid.startsWith(`${myNum}@`)) ||
-      (myLid && jid.startsWith(`${myLid}@`)) ||
+    ((last10.length === 10 && jidUser.endsWith(last10)) ||
+      (myLid && jidUser === myLid) ||
       savedSelfJids.has(jid) ||
       config.allowedUserJids.includes(jid));
 
