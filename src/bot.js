@@ -157,7 +157,6 @@ async function downloadFromUrl(url, mode) {
       url,
     ]);
 
-    // Normalizar a H.264 yuv420p + faststart para que WhatsApp/Android siempre lo reproduzca
     await execFileAsync('ffmpeg', [
       '-y',
       '-i',
@@ -183,26 +182,6 @@ async function downloadFromUrl(url, mode) {
   } finally {
     await fs.promises.unlink(rawTemp).catch(() => {});
     await fs.promises.unlink(finalTemp).catch(() => {});
-  }
-}
-
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  if (mode === 'audio') {
-    const out = path.join(os.tmpdir(), `wsb-${id}.%(ext)s`);
-    const final = path.join(os.tmpdir(), `wsb-${id}.mp3`);
-    try {
-      await execFileAsync(config.ytdlpPath, ['--no-playlist', '-x', '--audio-format', 'mp3', '--audio-quality', '0', '-o', out, url]);
-      return { buffer: await fs.promises.readFile(final), ext: 'mp3' };
-    } finally {
-      await fs.promises.unlink(final).catch(() => {});
-    }
-  }
-  const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
-  try {
-    await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
-    return { buffer: await fs.promises.readFile(temp), ext: 'mp4' };
-  } finally {
-    await fs.promises.unlink(temp).catch(() => {});
   }
 }
 
@@ -313,9 +292,9 @@ async function handleWAMessage(slotNum, sock, msg) {
     return;
   }
 
- if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
+  if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
     saveSelfJid(jid);
-    await sock.sendMessage(jid, { text: '✅ Chat personal vinculado.' }, { quoted: msg });
+    await sock.sendMessage(jid, { text: '✅ Chat personal vinculado correctamente.' }, { quoted: msg });
     return;
   }
 
@@ -706,7 +685,7 @@ async function startWASlot(slotNum) {
     const nowSec = Math.floor(Date.now() / 1000);
     for (const msg of messages) {
       const msgTs = Number(msg.messageTimestamp || nowSec);
-      if (nowSec - msgTs > 30) continue; // Ignora historial viejo al reconectar
+      if (nowSec - msgTs > 30) continue;
       await handleWAMessage(slotNum, sock, msg);
     }
   });
