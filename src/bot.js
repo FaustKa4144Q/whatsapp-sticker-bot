@@ -142,6 +142,61 @@ async function downloadFromUrl(url, mode) {
       await fs.promises.unlink(final).catch(() => {});
     }
   }
+
+  const rawTemp = path.join(os.tmpdir(), `wsb-raw-${id}.mp4`);
+  const finalTemp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
+  try {
+    await execFileAsync(config.ytdlpPath, [
+      '--no-playlist',
+      '-f',
+      'bv*[ext=mp4][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b',
+      '--merge-output-format',
+      'mp4',
+      '-o',
+      rawTemp,
+      url,
+    ]);
+
+    // Normalizar a H.264 yuv420p + faststart para que WhatsApp/Android siempre lo reproduzca
+    await execFileAsync('ffmpeg', [
+      '-y',
+      '-i',
+      rawTemp,
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '23',
+      '-pix_fmt',
+      'yuv420p',
+      '-movflags',
+      '+faststart',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      finalTemp,
+    ]);
+
+    return { buffer: await fs.promises.readFile(finalTemp), ext: 'mp4' };
+  } finally {
+    await fs.promises.unlink(rawTemp).catch(() => {});
+    await fs.promises.unlink(finalTemp).catch(() => {});
+  }
+}
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  if (mode === 'audio') {
+    const out = path.join(os.tmpdir(), `wsb-${id}.%(ext)s`);
+    const final = path.join(os.tmpdir(), `wsb-${id}.mp3`);
+    try {
+      await execFileAsync(config.ytdlpPath, ['--no-playlist', '-x', '--audio-format', 'mp3', '--audio-quality', '0', '-o', out, url]);
+      return { buffer: await fs.promises.readFile(final), ext: 'mp3' };
+    } finally {
+      await fs.promises.unlink(final).catch(() => {});
+    }
+  }
   const temp = path.join(os.tmpdir(), `wsb-${id}.mp4`);
   try {
     await execFileAsync(config.ytdlpPath, ['--no-playlist', '-f', 'bv*[ext=mp4][vcodec^=avc1][filesize<45M]+ba[ext=m4a]/b[ext=mp4][filesize<45M]/b[ext=mp4]/b', '--merge-output-format', 'mp4', '-o', temp, url]);
