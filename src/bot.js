@@ -258,13 +258,13 @@ async function handleWAMessage(slotNum, sock, msg) {
     return;
   }
 
-  if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
+ if (text.toLowerCase() === '!yo' && !isGroup && msg.key.fromMe) {
     saveSelfJid(jid);
-    await sock.sendMessage(jid, { text: '✅ Chat personal vinculado correctamente.' }, { quoted: msg });
+    await sock.sendMessage(jid, { text: '✅ Chat personal vinculado.' }, { quoted: msg });
     return;
   }
 
-const myNum = sock.user?.id?.split(':')[0]?.split('@')[0] || '';
+  const myNum = sock.user?.id?.split(':')[0]?.split('@')[0] || '';
   const myLid = sock.user?.lid?.split(':')[0]?.split('@')[0] || '';
   const jidUser = jid.split('@')[0];
   const last10 = myNum.slice(-10);
@@ -647,8 +647,13 @@ async function startWASlot(slotNum) {
     }
   });
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-    for (const msg of messages) await handleWAMessage(slotNum, sock, msg);
+    if (type !== 'notify' && type !== 'append') return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    for (const msg of messages) {
+      const msgTs = Number(msg.messageTimestamp || nowSec);
+      if (nowSec - msgTs > 30) continue; // Ignora historial viejo al reconectar
+      await handleWAMessage(slotNum, sock, msg);
+    }
   });
 }
 
