@@ -12,6 +12,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import { clearAIHistory, processWithAI } from './aiChat.js';
+import { extractOpusAudioFromVideo, sendSoundSticker } from './audioSticker.js';
 import { config } from './config.js';
 import { downloadTaggedTrack, searchTracks } from './musicFinder.js';
 import { buildPdfFromImages } from './pdfBuilder.js';
@@ -23,8 +24,6 @@ import {
   startReminderLoop,
 } from './reminders.js';
 import { convertToSticker } from './stickerConverter.js';
-import { extractOpusAudioFromVideo, sendSoundSticker } from './audioSticker.js';
-
 
 const execFileAsync = promisify(execFile);
 const logger = pino({ level: 'warn' });
@@ -267,7 +266,7 @@ async function executeWAUrl(sock, jid, msg, url, action) {
     } else {
       const { buffer, ext } = await downloadFromUrl(url, 'sticker');
       const sticker = await convertToSticker(buffer, { isAnimated: true, ext, packName: config.packName, author: config.author, maxVideoSeconds: config.maxVideoSeconds });
-      await sock.sendMessage(jid, { sticker }, { quoted: msg });
+      await sendSmartSticker(sock, jid, msg, sticker, buffer, true, ext);
     }
     await react(sock, jid, msg.key, '✅');
   } catch (err) {
@@ -386,7 +385,7 @@ async function handleWAMessage(slotNum, sock, msg) {
     await react(sock, jid, msg.key, '⏳');
     try {
       const sticker = await convertToSticker(buffer, { isAnimated: media.isAnimated, ext: media.ext, packName: config.packName, author: config.author, maxVideoSeconds: config.maxVideoSeconds });
-      await sock.sendMessage(jid, { sticker }, { quoted: msg });
+      await sendSmartSticker(sock, jid, msg, sticker, buffer, media.isAnimated, media.ext);
       await react(sock, jid, msg.key, '✅');
     } catch (err) {
       await react(sock, jid, msg.key, '❌');
