@@ -23,6 +23,8 @@ import {
   startReminderLoop,
 } from './reminders.js';
 import { convertToSticker } from './stickerConverter.js';
+import { extractOpusAudioFromVideo, sendSoundSticker } from './audioSticker.js';
+
 
 const execFileAsync = promisify(execFile);
 const logger = pino({ level: 'warn' });
@@ -234,6 +236,23 @@ function detectMedia(c) {
     if (mime.startsWith('video/')) return { isAnimated: true, ext: 'mp4', isImage: false };
   }
   return null;
+}
+
+async function sendSmartSticker(sock, jid, msg, stickerBuffer, sourceBuffer, isVideo, ext) {
+  if (isVideo && sourceBuffer) {
+    try {
+      const ogg = await extractOpusAudioFromVideo(sourceBuffer, ext, config.maxVideoSeconds);
+      if (ogg) {
+        const sent = await sendSoundSticker(sock, jid, stickerBuffer, ogg, msg);
+        if (sent?.key?.id) {
+          botSentIds.add(sent.key.id);
+          sentMessagesStore.set(sent.key.id, sent.message);
+        }
+        return;
+      }
+    } catch {}
+  }
+  await sock.sendMessage(jid, { sticker: stickerBuffer }, { quoted: msg });
 }
 
 async function executeWAUrl(sock, jid, msg, url, action) {
