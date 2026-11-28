@@ -199,7 +199,7 @@ async function downloadFromUrl(url, mode) {
     try {
       return await downloadTikTok(url, mode);
     } catch {
-      // Si TikWM falla o devuelve respuesta vacía, cae automáticamente a yt-dlp
+      // Si TikWM falla, cae automáticamente a yt-dlp
     }
   }
 
@@ -229,16 +229,26 @@ async function downloadFromUrl(url, mode) {
       url,
     ]);
 
+    // Si es sticker, no hace falta recodificar todo el video antes
+    if (mode === 'sticker') {
+      return { buffer: await fs.promises.readFile(rawTemp), ext: 'mp4' };
+    }
+
+    // Limitar resolución y hilos (-threads 2) para no saturar la RAM de Railway
     await execFileAsync('ffmpeg', [
       '-y',
+      '-threads',
+      '2',
       '-i',
       rawTemp,
+      '-vf',
+      "scale='min(1280,iw)':-2",
       '-c:v',
       'libx264',
       '-preset',
-      'veryfast',
+      'ultrafast',
       '-crf',
-      '23',
+      '24',
       '-pix_fmt',
       'yuv420p',
       '-movflags',
@@ -256,6 +266,7 @@ async function downloadFromUrl(url, mode) {
     await fs.promises.unlink(finalTemp).catch(() => {});
   }
 }
+
 
 function unwrapMessage(m) {
   let c = m;
