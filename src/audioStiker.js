@@ -1,13 +1,10 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import {
-  generateMessageIDV2,
-  prepareWAMessageMedia,
-  proto,
-} from '@whiskeysockets/baileys';
+import { prepareWAMessageMedia, proto } from '@whiskeysockets/baileys';
 
 const execFileAsync = promisify(execFile);
 const RAW_AUDIO_SYM = Symbol('rawAudioMsgBytes');
@@ -23,7 +20,6 @@ function ensureStickerAudioEncoder() {
   proto.Message.StickerMessage.encode = (message, writer) => {
     const w = origEncode(message, writer);
     if (message && message[RAW_AUDIO_SYM]) {
-      // Campo 26 (wire type 2 => (26 << 3) | 2 = 210) para audioMessage dentro de StickerMessage
       w.uint32(210).bytes(message[RAW_AUDIO_SYM]);
     }
     return w;
@@ -38,7 +34,6 @@ export async function extractOpusAudioFromVideo(videoBuffer, ext = 'mp4', maxSec
   try {
     await fs.promises.writeFile(inPath, videoBuffer);
 
-    // Revisar si el video realmente tiene pista de audio (ej. los GIF de X no traen)
     const { stdout } = await execFileAsync('ffprobe', [
       '-v',
       'error',
@@ -108,7 +103,7 @@ export async function sendSoundSticker(sock, jid, stickerBuffer, oggBuffer, quot
     };
   }
 
-  const msgId = generateMessageIDV2(sock.user?.id);
+  const msgId = `3EB0${randomBytes(10).toString('hex').toUpperCase()}`;
   await sock.relayMessage(jid, message, { messageId: msgId });
   return { key: { remoteJid: jid, fromMe: true, id: msgId }, message };
 }
